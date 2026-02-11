@@ -1,3 +1,8 @@
+# saved data
+*.zip
+results/
+wandb/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -25,6 +30,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# others
+.DS_Store
+*.zip
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
