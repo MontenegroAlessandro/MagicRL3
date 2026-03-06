@@ -1,0 +1,38 @@
+wandb:
+  project: sb3-ppo  
+  sync_tensorboard: true
+
+experiment:
+  # ENV
+  env_name: HalfCheetah-v5
+  n_envs: 4 # 64
+  total_timesteps: 5e6
+  dir_name: results
+  # PPO Parameters
+  policy_type: MlpPolicy
+  learning_rate: 3e-4
+  n_steps: 1024 # 64
+  batch_size: 32
+  n_epochs: 2
+  gamma: 0.999
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  normalize_advantage: true
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  use_sde: false
+  sde_sample_freq: -1
+  rollout_buffer_class: null
+  rollout_buffer_kwargs: null
+  target_kl: null
+  stats_window_size: 100
+  tensorboard_log: null
+  policy_kwargs: null
+  verbose: 0
+  seed: 2026
+  device: auto
+  # Reusing Trajectories
+  window_size: 5 
+  on_policy_critic: true
