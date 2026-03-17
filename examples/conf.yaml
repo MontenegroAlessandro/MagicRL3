@@ -1,5 +1,5 @@
 wandb:
-  project: rt-ppo-0
+  project: rt-ppo-1
   sync_tensorboard: true
 
 experiment:
