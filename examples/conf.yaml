@@ -5,18 +5,18 @@ wandb:
 experiment:
   # ENV
   env_name: HalfCheetah-v5
-  n_envs: 16             
-  total_timesteps: 5e6 
+  n_envs: 1             
+  total_timesteps: 2e6 
   dir_name: results
   render: false
   
   # PPO Parameters
   policy_type: MlpPolicy
   learning_rate: 3e-4  
-  n_steps: 128         
+  n_steps: 512         
   batch_size: 64       
-  n_epochs: 10         
-  gamma: 0.99          
+  n_epochs: 20         
+  gamma: 0.999          
   gae_lambda: 0.95     
   clip_range: 0.2      
   clip_range_vf: null
@@ -28,11 +28,11 @@ experiment:
   sde_sample_freq: -1
   rollout_buffer_class: null
   rollout_buffer_kwargs: null
-  target_kl: 0.05
+  target_kl: 0.02
   stats_window_size: 100
   tensorboard_log: null
   policy_kwargs: 
-    net_arch: [256, 256]   
+    net_arch: [64, 64]   
   verbose: 0
   seed: 2026
   device: auto
