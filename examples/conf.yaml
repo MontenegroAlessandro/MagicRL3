@@ -8,6 +8,7 @@ experiment:
   n_envs: 16             
   total_timesteps: 5e6 
   dir_name: results
+  render: false
   
   # PPO Parameters
   policy_type: MlpPolicy
@@ -35,7 +36,7 @@ experiment:
   verbose: 0
   seed: 2026
   device: auto
-  
+
   # Reusing Trajectories
   window_size: 1 
   on_policy_critic: false
