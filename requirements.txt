@@ -59,7 +59,7 @@ scipy==1.15.3
 sentry-sdk==2.52.0
 six==1.17.0
 smmap==5.0.2
-stable-baselines==2.10.2
+# stable-baselines==2.10.2
 stable_baselines3==2.7.1
 sympy==1.14.0
 tensorboard==2.20.0

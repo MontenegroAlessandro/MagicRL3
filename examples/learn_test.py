@@ -18,11 +18,13 @@ def main(cfg: DictConfig):
     exp = cfg.experiment
 
     # logger
+    base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic}"
     run = wandb.init(
         project=cfg.wandb.project,
         config=OmegaConf.to_container(cfg, resolve=True),
         sync_tensorboard=cfg.wandb.sync_tensorboard,
-        name=f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic}",
+        group=base_name,                       
+        name=f"{base_name}_seed={exp.seed}",   
     )
 
     # make the env
