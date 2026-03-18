@@ -120,7 +120,20 @@ class RT_PPO(PPO):
                 # and Schulman blog: http://joschu.net/blog/kl-approx.html
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                    # NOTE: for the RT-PPO, we apply the early stopping criterion to all data, not just the on-policy 
+                    # data, since the old log probs of the off-policy data will lead a.s. to high KL divergence
+                    # this is done to defend against unlucky sampling
+                    on_policy_mask = rollout_data.on_policy_mask.bool()
+                    if on_policy_mask.sum() > 0:
+                        log_ratio_on_policy = log_ratio[on_policy_mask]
+                        approx_kl_div = th.mean(
+                            (th.exp(log_ratio_on_policy) - 1) - log_ratio_on_policy
+                        ).cpu().numpy()
+                    else:
+                        # No on-policy samples in this minibatch — skip early stopping
+                        approx_kl_div = 0.0
+
+                    # approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
                     approx_kl_divs.append(approx_kl_div)
 
                 if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
