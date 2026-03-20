@@ -40,3 +40,4 @@ experiment:
   # Reusing Trajectories
   window_size: 1 
   on_policy_critic: false
+  weight_type: naive # "naive" or "bh"

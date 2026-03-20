@@ -18,13 +18,16 @@ def main(cfg: DictConfig):
     exp = cfg.experiment
 
     # logger
-    base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic}"
+    if exp.window_size > 1:
+        base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type}"
+    else:
+        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs}"
     run = wandb.init(
         project=cfg.wandb.project,
         config=OmegaConf.to_container(cfg, resolve=True),
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,                       
-        name=f"{base_name}_seed={exp.seed}",   
+        name=f"{base_name} seed={exp.seed}",   
     )
 
     # make the env
@@ -67,7 +70,9 @@ def main(cfg: DictConfig):
             rollout_buffer_class=MultiRolloutBuffer,
             rollout_buffer_kwargs=dict(
                 window_size=exp.window_size,
+                use_bh=(exp.weight_type == "bh"),
             ),
+            is_weight_type=exp.weight_type,
             # Old PPO args
             policy=exp.policy_type,
             env=env,
