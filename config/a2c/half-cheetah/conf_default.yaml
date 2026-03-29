@@ -1,0 +1,49 @@
+wandb:
+  project: sb3-a2c
+  sync_tensorboard: true
+  group: A2C envs=${experiment.n_envs} steps=${experiment.n_steps}
+  name: seed_${experiment.seed}
+  tags: null
+
+
+experiment:
+  # ENV
+  env_name: HalfCheetah-v5
+  n_envs: 1 # 64
+
+  # Training
+  total_timesteps: 1e6
+  output_dir: results
+  render: false
+  model_save_freq: 10000
+
+  # A2C Parameters
+  policy_type: MlpPolicy
+  learning_rate: 7e-4 # 7e-4
+  n_steps: 5 # 5
+  gamma: 0.99 # 0.99
+  gae_lambda: 1.0 # 1.0
+  ent_coef: 0.0 # 0.0
+  vf_coef: 0.5 # 0.5
+  max_grad_norm: 0.5 # 0.5
+  rms_prop_eps: 1e-5 # 1e-5
+  use_rms_prop: false # true
+  use_sde: false # false
+  sde_sample_freq: -1 # -1
+  rollout_buffer_class: null
+  rollout_buffer_kwargs: null 
+  normalize_advantage: true # false
+  stats_window_size: 100 # 100
+  tensorboard_log: null
+  policy_kwargs: null
+  verbose: 0
+  seed: 2026
+  device: cpu
+
+  # Reusing Trajectories
+  window_size: 1 
+  on_policy_critic: false
+
+hydra:
+  run:
+    dir: ${output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}

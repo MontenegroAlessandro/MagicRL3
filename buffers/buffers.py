@@ -12,6 +12,7 @@ from stable_baselines3.common.type_aliases import RolloutBufferSamples
 from stable_baselines3.common.vec_env import VecNormalize
 
 
+# this is the data structure that arrives to the policy in train()
 class RTRolloutBufferSamples(NamedTuple):
     """
     Extended rollout buffer exposing:
@@ -20,15 +21,16 @@ class RTRolloutBufferSamples(NamedTuple):
     2.  all_log_probs: (optional) log probabilities under all the behavioral policies in the window. 
         The shape is (batch_size, window_size). It is needed just for balance heuristic corrections.
     """
-    observations: th.Tensor
-    actions: th.Tensor
-    old_values: th.Tensor
-    old_log_prob: th.Tensor
-    advantages: th.Tensor
-    returns: th.Tensor
-    on_policy_mask: th.Tensor 
-    all_log_probs: Optional[th.Tensor] = None  
-
+    observations: th.Tensor  # (n_steps * n_envs, obs_shape)
+    actions: th.Tensor  # (n_steps * n_envs, action_shape)
+    old_values: th.Tensor  # (n_steps * n_envs)
+    old_log_prob: th.Tensor  # (n_steps * n_envs)
+    advantages: th.Tensor  # (n_steps * n_envs)
+    returns: th.Tensor  # (n_steps * n_envs)
+    on_policy_mask: th.Tensor  # (n_steps * n_envs) binary mask: 1.0 for current iteration's samples, 0.0 for past iterations
+    window_id: th.Tensor  # (n_steps * n_envs) integer in [0, window_size-1] indicating which policy in the window generated the sample; 0 means current policy, 1 means previous policy, etc.
+    all_log_probs: Optional[th.Tensor] = None  # (n_steps * n_envs, window_size) log probs under all behavioral policies in the window; only present if use_bh=True
+    
 
 class MultiRolloutBuffer(RolloutBuffer):
     def __init__(self, *args, window_size=1, use_bh: bool = False, **kwargs):
@@ -38,96 +40,122 @@ class MultiRolloutBuffer(RolloutBuffer):
         """
         self.window_length = window_size
         self.history = deque(maxlen=max(0, window_size - 1))
-        self._combined_tensors = {}
         self.use_bh = use_bh and window_size > 1
+        self._combined_tensors = {}
 
         # super class init
         super().__init__(*args, **kwargs)
 
-        # allocate the matrix of log probs for the BH
-        self._current_all_log_probs = None
-        if self.use_bh:
-            self._current_all_log_probs = np.full(
-                (self.buffer_size, self.n_envs, self.window_length),
-                fill_value=-np.inf,
-                dtype=np.float32,
+
+
+    def set_current_policy(self, policy):
+        # Store a frozen copy of the policy directly on the correct device
+        policy_copy = copy.deepcopy(policy)
+        policy_copy.to(policy.device)
+        policy_copy.set_training_mode(False)
+
+        self._current_policy = policy_copy
+
+
+    def update_all_log_probs(self):
+        """
+        Current situation: 
+        - current policy π_k is stored in self._current_policy
+        - in self we have the current rollout_k (observations, actions, returns, etc)
+        - history = [rollout_{k-1}, rollout_{k-2}, ..., rollout_{k-w+1}]  -->  length = w-1
+        - history = [π_{k-1}, π_{k-2}, ..., π_{k-w+1}]  -->  length = w-1
+        - rollout_j["all_log_probs"] = [log π_{k-1}, log π_{k-2}, ..., log π_{k-w+1}, log π_{k-w}]  -->  length = w
+
+        Step 1:
+        - we want to fill self._current_all_log_probs, which has shape (n_steps, n_envs, window_size)
+        - self._current_all_log_probs = [log π_k, log π_{k-1}, log π_{k-2}, ..., log π_{k-w+1}]
+
+        Step 2:
+        - we want to update all_log_probs in the history with the new policy π_k evaluated on past data
+        - rollout_j["all_log_probs"] = [log π_k, log π_{k-1}, log π_{k-2}, ..., log π_{k-w+1}] for each j in history
+        """
+        
+        if not self.use_bh:
+            return
+
+        assert self._current_policy is not None, "Policy must be set before update_all_log_probs()"
+
+        # Step 0: get flattened current rollout
+        obs = self.swap_and_flatten(self.observations)
+        actions = self.swap_and_flatten(self.actions)
+
+        # Step 1: fill current rollout matrix\
+        self._fill_current_all_log_probs(obs, actions)
+
+        # Step 2: update history
+        self._update_history_all_log_probs()
+
+
+    def _fill_current_all_log_probs(self, obs, actions):
+        """
+        Fill self._current_all_log_probs with:
+        [π_k, π_{k-1}, ..., π_{k-w+1}]
+        """
+        # Column 0 → current policy
+        log_prob = self._eval_log_prob(self._current_policy, obs, actions)
+        self._current_all_log_probs[:, :, 0] = self._unflatten_and_swap(log_prob, self.buffer_size, self.n_envs)
+
+        # Columns 1..w-1 → past policies
+        for i, entry in enumerate(self.history):
+            if "policy" not in entry:
+                continue
+
+            past_policy = entry["policy"]
+            log_prob = self._eval_log_prob(past_policy, obs, actions)
+
+            self._current_all_log_probs[:, :, i + 1] = log_prob.reshape(
+                self.buffer_size, self.n_envs
             )
-            # j-th column has the $\log \pi_{j}$ for the current rollout
 
-    def store_current_log_probs(self, log_probs: np.ndarray) -> None:
-        """
-        Store the log prob of the current policy for the current rollout into column 0 of the all_log_probs matrix.
-        This is already called by SB3, but we are exposing it to deal with the new buffer.
-        """
-        if not self.use_bh:
-            return
-        
-        self._current_all_log_probs[:, :, 0] = log_probs
-    
-    def update_past_log_probs(self, log_probs: np.ndarray, history_idx: int) -> None:
-        """
-        Fill "log pi new" for past data. This is called after having collected a new rollout. 
-        """
-        if not self.use_bh:
-            return
-        
-        entry = self.history[history_idx]
-        alp = entry["all_log_probs"]          # (n_flat, n_cols)
-        new_col = log_probs.reshape(-1, 1)    # (n_flat, 1)
+    def _unflatten_and_swap(self, arr, n_steps, n_envs):
+        return arr.reshape(n_envs, n_steps, *arr.shape[1:]).swapaxes(0, 1)
 
-        if alp.shape[1] < self.window_length:
-            # still building ... just append
-            entry["all_log_probs"] = np.concatenate([alp, new_col], axis=1)
-        else:
-            # already at window_length 
-            # keep col 0 (behavioral)
-            # drop col 1 (oldest non-behavioral), shift cols 2.. left, append new col
+
+    def _update_history_all_log_probs(self):
+        """
+        Prepend log π_k to each history entry and truncate.
+        history[j]["all_log_probs"] = [log π_k, log π_{k-1}, log π_{k-2}, ..., log π_{k-w+1}] for each j
+        """
+        for entry in self.history:
+            if "policy" not in entry or "all_log_probs" not in entry:
+                continue
+
+            obs = entry["observations"]  # already flattened
+            actions = entry["actions"]  # already flattened
+
+            log_prob = self._eval_log_prob(self._current_policy, obs, actions)
+            log_prob = log_prob.reshape(-1, 1)
+
+            # prepend π_k
             entry["all_log_probs"] = np.concatenate(
-                [alp[:, :1], alp[:, 2:], new_col], axis=1
+                [log_prob, entry["all_log_probs"]],
+                axis=1,
             )
 
-    def update_current_cross_log_probs(self, log_probs: np.ndarray, policy_idx: int) -> None:
+            # truncate to window size
+            entry["all_log_probs"] = entry["all_log_probs"][:, :self.window_length]
+
+
+    def _eval_log_prob(self, policy, obs, actions):
         """
-        Fill column `policy_idx` of _current_all_log_probs with log probs from
-        a past policy evaluated on the current rollout's data.
+        Evaluate log π(a|s) for a given policy on numpy inputs.
+        Returns a flat numpy array.
         """
-        if not self.use_bh:
-            return
-        
-        err_msg = f"policy_idx must be in [1, window_length-1], got {policy_idx}"
-        assert 0 < policy_idx < self.window_length, err_msg
-        self._current_all_log_probs[:, :, policy_idx] = log_probs
+        device = policy.device
 
-    def old_reset(self) -> None:
-        if self.full and self.window_length > 1:
-            # first of all we need to flatten all_log_probs
-            flat_all_log_probs = self._current_all_log_probs.reshape(
-                self.buffer_size * self.n_envs, self.window_length
-            )
+        obs_t = th.as_tensor(obs).to(device)
+        actions_t = th.as_tensor(actions).to(device)
 
-            # keep just the filled columns (column 0 is always filled)
-            n_filled = 1 + len(self.history)  # current + how many past we have
-            flat_all_log_probs = flat_all_log_probs[:, :n_filled]
+        with th.no_grad():
+            _, log_prob, _ = policy.evaluate_actions(obs_t, actions_t)
 
-            # insert into the history
-            self.history.append({
-                "observations": self.observations.copy(),
-                "actions": self.actions.copy(),
-                "values": self.values.copy(),
-                "log_probs": self.log_probs.copy(),
-                "advantages": self.advantages.copy(),
-                "returns": self.returns.copy(),
-                "all_log_probs": flat_all_log_probs,
-            })
+        return log_prob.cpu().numpy()
 
-        # reset the current log probs matrix for the next iteration
-        self._current_all_log_probs.fill(-np.inf)
-
-        # free memory for the combined tensor
-        self._combined_tensors.clear()
-
-        # reset
-        super().reset()
 
     def reset(self) -> None:
         if self.full and self.window_length > 1:
@@ -140,22 +168,34 @@ class MultiRolloutBuffer(RolloutBuffer):
                 "returns": self.returns.copy(),
             }
             if self.use_bh:
-                flat_all_log_probs = self._current_all_log_probs.reshape(
-                    self.buffer_size * self.n_envs, self.window_length
-                )
-                # Only keep filled columns (column 0 always filled; 1..w-1 filled lazily)
-                n_filled = 1 + len(self.history)
-                entry["all_log_probs"] = flat_all_log_probs[:, :n_filled].copy()
+                entry["policy"] = self._current_policy
+                entry["all_log_probs"] = self._current_all_log_probs.copy() 
 
-            self.history.append(entry)
+            self.history.appendleft(entry)
 
-        if self.use_bh and hasattr(self, "_current_all_log_probs") and self._current_all_log_probs is not None:
-            self._current_all_log_probs[:] = -np.inf
-
+        self._current_policy = None
+        self._current_all_log_probs = np.full(
+            (self.buffer_size, self.n_envs, self.window_length),
+            fill_value=-np.inf,
+            dtype=np.float32,
+        )
         self._combined_tensors.clear()
         super().reset()
 
+
     def get(self, batch_size=None):
+        '''
+        Current situation:
+        - in self we have the current rollout (observations, actions, returns, etc)
+        - self.all_log_probs = [log π_k, log π_{k-1}, ..., log π_{k-w+1}] for the current rollout
+        - history = [rollout_{k-1}, rollout_{k-2}, ..., rollout_{k-w+1}]  -->  length = w-1
+        - history = [π_{k-1}, π_{k-2}, ..., π_{k-w+1}]  -->  length = w-1
+        - rollout_j["all_log_probs"] = [log π_k, log π_{k-1}, ..., log π_{k-w+1}] for each j
+
+        This function concateates the current rollout with the historical rollouts
+        Then it yields minibatches from the combined dataset
+        '''
+
         assert self.full, "Rollout buffer must be full before sampling from it"
 
         if not self.generator_ready:
@@ -164,52 +204,46 @@ class MultiRolloutBuffer(RolloutBuffer):
             # Flatten current buffer arrays
             for tensor in _tensor_names:
                 self.__dict__[tensor] = self.swap_and_flatten(self.__dict__[tensor])
+            if self.use_bh:
+                self._current_all_log_probs = self.swap_and_flatten(self._current_all_log_probs)
             self.generator_ready = True
 
-            current_size = self.__dict__["observations"].shape[0]
 
-            # If no history, just link the combined tensors to the current arrays
-            if self.window_length == 1 or len(self.history) == 0:
-                for tensor in _tensor_names:
-                    self._combined_tensors[tensor] = self.__dict__[tensor]
-                # All samples are on-policy
-                self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
-                
-                if self.use_bh:
-                    flat_current_all_log_probs = self._current_all_log_probs.reshape(
-                        current_size, self.window_length
-                    )
-                    # all_log_probs for current data: just column 0
-                    self._combined_tensors["all_log_probs"] = flat_current_all_log_probs[:, :1]
-            else:
-                for tensor in _tensor_names:
-                    tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
-                    self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
+        current_size = self.__dict__["observations"].shape[0]
 
-                # Build on-policy mask: 1.0 for current, 0.0 for past
-                total_size = self._combined_tensors["observations"].shape[0]
-                mask = np.zeros(total_size, dtype=np.float32)
-                mask[:current_size] = 1.0
-                self._combined_tensors["on_policy_mask"] = mask
+        # If no history, just link the combined tensors to the current arrays
+        if self.window_length == 1 or len(self.history) == 0:
+            for tensor in _tensor_names:
+                self._combined_tensors[tensor] = self.__dict__[tensor]
 
-                if self.use_bh:
-                    flat_current_all_log_probs = self._current_all_log_probs.reshape(
-                        current_size, self.window_length
-                    )
-                    # Pad all_log_probs matrices to the same width (window_length) before concat.
-                    # Current data has window_length columns; historical data may have fewer
-                    # if we haven't accumulated w iterations yet.
-                    padded = [flat_current_all_log_probs]
-                    for h in self.history:
-                        h_lp = h["all_log_probs"]           # (n_flat, n_cols)
-                        n_missing = self.window_length - h_lp.shape[1]
-                        if n_missing > 0:
-                            pad = np.full(
-                                (h_lp.shape[0], n_missing), -np.inf, dtype=np.float32
-                            )
-                            h_lp = np.concatenate([h_lp, pad], axis=1)
-                        padded.append(h_lp)
-                    self._combined_tensors["all_log_probs"] = np.concatenate(padded, axis=0)
+            # All samples are on-policy
+            self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
+            self._combined_tensors["window_id"] = np.zeros(current_size, dtype=np.float32)
+            
+            if self.use_bh:
+                self._combined_tensors["all_log_probs"] = self._current_all_log_probs
+
+        else:
+            for tensor in _tensor_names:
+                tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
+                self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
+
+            # Build on-policy mask: 1.0 for current, 0.0 for past
+            total_size = self._combined_tensors["observations"].shape[0]
+            mask = np.zeros(total_size, dtype=np.float32)
+            mask[:current_size] = 1.0
+            self._combined_tensors["on_policy_mask"] = mask
+
+            # Build window_id: 0 for current, 1 for previous, ... , w-1 for oldest in the window  
+            window_ids = np.zeros(current_size, dtype=np.float32)  # current rollout = 0 
+            for i, h in enumerate(self.history):  
+                size = h["observations"].shape[0]  
+                window_ids = np.concatenate([window_ids, np.full(size, i + 1, dtype=np.int32)])  
+            self._combined_tensors["window_id"] = window_ids 
+            
+            if self.use_bh:
+                all_log_probs_to_concat = [self._current_all_log_probs] + [h["all_log_probs"] for h in self.history]
+                self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
 
         # Yield minibatches from the combined dataset
         total_size = self._combined_tensors["observations"].shape[0]
@@ -223,13 +257,8 @@ class MultiRolloutBuffer(RolloutBuffer):
             yield self._get_combined_samples(indices[start_idx : start_idx + batch_size])
             start_idx += batch_size
 
+
     def _get_combined_samples(self, batch_inds: np.ndarray) -> RTRolloutBufferSamples:
-        # all_log_probs is only present when use_bh=True; fall back to old_log_prob reshaped
-        all_log_probs = (
-            self._combined_tensors["all_log_probs"][batch_inds]
-            if self.use_bh
-            else self._combined_tensors["log_probs"][batch_inds].flatten().reshape(-1, 1)
-        )
         data = (
             self._combined_tensors["observations"][batch_inds],
             self._combined_tensors["actions"][batch_inds].astype(np.float32, copy=False),
@@ -238,6 +267,7 @@ class MultiRolloutBuffer(RolloutBuffer):
             self._combined_tensors["advantages"][batch_inds].flatten(),
             self._combined_tensors["returns"][batch_inds].flatten(),
             self._combined_tensors["on_policy_mask"][batch_inds],
-            all_log_probs,
+            self._combined_tensors["window_id"][batch_inds],
+            self._combined_tensors["all_log_probs"][batch_inds],
         )
         return RTRolloutBufferSamples(*tuple(map(self.to_torch, data)))

@@ -42,6 +42,7 @@ class RT_PPO(PPO):
         else:
             self._policy_history = None
 
+
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
         After the standard rollout collection we:
