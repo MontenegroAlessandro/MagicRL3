@@ -61,7 +61,7 @@ def main(cfg: DictConfig):
             sde_sample_freq=exp.sde_sample_freq,
             normalize_advantage=exp.normalize_advantage,
             stats_window_size=exp.stats_window_size,
-            tensorboard_log=f"{run_dir}/runs/{run.id}",
+            tensorboard_log=f"{run_dir}/tb",
             policy_kwargs=policy_kwargs,
             verbose=exp.verbose,
             seed=exp.seed,
@@ -92,7 +92,7 @@ def main(cfg: DictConfig):
             sde_sample_freq=exp.sde_sample_freq,
             normalize_advantage=exp.normalize_advantage,
             stats_window_size=exp.stats_window_size,
-            tensorboard_log=f"{run_dir}/runs/{run.id}",
+            tensorboard_log=f"{run_dir}/tb",
             policy_kwargs=policy_kwargs,
             verbose=exp.verbose,
             seed=exp.seed,
@@ -106,7 +106,7 @@ def main(cfg: DictConfig):
             verbose=2,
         ),
     )
-    model.save(f"{run_dir}/ppo_halfcheetah")
+    model.save(f"{run_dir}/model")
 
 if __name__ == "__main__":
     main()

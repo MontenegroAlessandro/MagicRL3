@@ -268,6 +268,9 @@ class MultiRolloutBuffer(RolloutBuffer):
             self._combined_tensors["returns"][batch_inds].flatten(),
             self._combined_tensors["on_policy_mask"][batch_inds],
             self._combined_tensors["window_id"][batch_inds],
-            self._combined_tensors["all_log_probs"][batch_inds],
         )
+
+        if self.use_bh:
+            data += (self._combined_tensors["all_log_probs"][batch_inds],)
+
         return RTRolloutBufferSamples(*tuple(map(self.to_torch, data)))
