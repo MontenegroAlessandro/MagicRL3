@@ -1,7 +1,8 @@
 import gymnasium as gym
+from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import A2C
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import wandb
 from wandb.integration.sb3 import WandbCallback
 import hydra
@@ -36,8 +37,23 @@ def main(cfg: DictConfig):
         reinit="finish_previous",
     )
 
-    # make the env
-    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
+    # # make the env
+    # env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
+    # env = VecNormalize(env, norm_reward=True, norm_obs=True)
+    
+    # # Apply time limit to each sub-environment
+    # for i in range(env.num_envs):
+    #     env.envs[i] = TimeLimit(env.envs[i], max_episode_steps=exp.n_steps)
+
+
+    def make_env():
+        def _init():
+            env = gym.make(exp.env_name)
+            env = TimeLimit(env, max_episode_steps=exp.n_steps)
+            return env
+        return _init
+
+    env = DummyVecEnv([make_env() for _ in range(exp.n_envs)])
     env = VecNormalize(env, norm_reward=True, norm_obs=True)
 
     # parse policy args
@@ -105,6 +121,7 @@ def main(cfg: DictConfig):
             model_save_path=f"{run_dir}/models/{run.id}",
             verbose=2,
         ),
+        log_interval=1,
     )
     model.save(f"{run_dir}/model")
 

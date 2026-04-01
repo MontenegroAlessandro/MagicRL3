@@ -1,4 +1,5 @@
 import gymnasium as gym
+from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import A2C, PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
@@ -33,6 +34,10 @@ def main(cfg: DictConfig):
     # make the env
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
     env = VecNormalize(env, norm_reward=True, norm_obs=True)
+    
+    # Apply time limit to each sub-environment
+    for i in range(env.num_envs):
+        env.envs[i] = TimeLimit(env.envs[i], max_episode_steps=exp.n_steps)
 
     # parse policy args
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
