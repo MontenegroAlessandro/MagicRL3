@@ -7,7 +7,7 @@ wandb:
 experiment:
   # ENV
   env_name: InvertedPendulum-v5
-  n_envs: 8 # 64   <=====
+  n_envs: 1 # 64   <=====
 
   # Training
   total_timesteps: 3e5
@@ -18,10 +18,10 @@ experiment:
   # A2C Parameters
   policy_type: MlpPolicy
   learning_rate: 7e-4 # 7e-4 
-  n_steps: 32 # 5   <=====
-  gamma: 0.99 # 0.99
+  n_steps: 200 # 5   <=====
+  gamma: 1 # 0.99
   gae_lambda: 1.0 # 1.0
-  ent_coef: 0.0 # 0.0
+  ent_coef: 0.01 # 0.0   <=====
   vf_coef: 0.5 # 0.5
   max_grad_norm: 0.5 # 0.5
   rms_prop_eps: 1e-5 # 1e-5

@@ -168,10 +168,13 @@ class RT_A2C(A2C):
             if not (rollout_data.window_id == i).any():
                 continue
             ratio_i = ratio[rollout_data.window_id == i]
-            self.logger.record(f"mean_ratio/mean_ratio_over_window_{i}", ratio_i.mean().item())
-            self.logger.record(f"max_ratio/mean_ratio_over_window_{i}", ratio_i.max().item())
-            self.logger.record(f"min_ratio/mean_ratio_over_window_{i}", ratio_i.min().item())
-            self.logger.record(f"std_ratio/mean_ratio_over_window_{i}", ratio_i.std().item())
+            eps = th.abs(ratio_i - 1.0)
+            self.logger.record(f"mean_ratio/over_window_{i}", ratio_i.mean().item())
+            self.logger.record(f"max_ratio/over_window_{i}", ratio_i.max().item())
+            self.logger.record(f"min_ratio/over_window_{i}", ratio_i.min().item())
+            self.logger.record(f"std_ratio/over_window_{i}", ratio_i.std().item())
+            self.logger.record(f"mean_|ratio-1|/over_window_{i}", eps.mean().item())
+
 
 
         # ======== DEBUGGING ==========

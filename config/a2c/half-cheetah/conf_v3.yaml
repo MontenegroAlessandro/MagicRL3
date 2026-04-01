@@ -1,8 +1,6 @@
 wandb:
-  project: sb3-a2c
+  project: sb3-a2c-half-cheetah-v2
   sync_tensorboard: true
-  group: RT-A2C 8x128 lr=0.0014 ent=0.002 gae_lambda=0.95 w=${experiment.window_size} opc=${experiment.on_policy_critic}
-  name: seed_${experiment.seed}
   tags: null
 
 experiment:
@@ -42,8 +40,12 @@ experiment:
   # Reusing Trajectories
   window_size: 1 
   on_policy_critic: false
+  weight_type: naive # "naive" or "bh"
 
 
 hydra:
   run:
-    dir: /storage/fis1/RT-DEEPRL/results/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${experiment.dir_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra.run.dir}
+    subdir: run_${hydra.job.num}
