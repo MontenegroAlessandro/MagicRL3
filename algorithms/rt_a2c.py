@@ -48,6 +48,12 @@ class RT_A2C(A2C):
         # Standard SB3 rollout collection
         result = super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps)
 
+        rollout_trajectories = env.num_envs + int(rollout_buffer.episode_starts[1:].sum())
+        completed_trajectories = int(rollout_buffer.episode_starts[1:].sum()) + int(self._last_episode_starts.sum())
+        self.logger.record("debug/rollout_trajectories", rollout_trajectories)
+        self.logger.record("debug/completed_trajectories", completed_trajectories)
+
+
         if self.rollout_buffer.window_length > 1 and self.is_weight_type == "bh":
             self.rollout_buffer.set_current_policy(self.policy)
             self.rollout_buffer.update_all_log_probs()

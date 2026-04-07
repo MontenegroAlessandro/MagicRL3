@@ -15,7 +15,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_a2c import RT_A2C
 from buffers.buffers import MultiRolloutBuffer
 
-@hydra.main(version_base=None, config_path="../config/a2c/inverted-pendulum", config_name="conf_v1")
+@hydra.main(version_base=None, config_path="../config/a2c/half-cheetah", config_name="conf_v1")
 def main(cfg: DictConfig):
     exp = cfg.experiment
     run_dir = HydraConfig.get().runtime.output_dir
@@ -37,23 +37,8 @@ def main(cfg: DictConfig):
         reinit="finish_previous",
     )
 
-    # # make the env
-    # env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    # env = VecNormalize(env, norm_reward=True, norm_obs=True)
-    
-    # # Apply time limit to each sub-environment
-    # for i in range(env.num_envs):
-    #     env.envs[i] = TimeLimit(env.envs[i], max_episode_steps=exp.n_steps)
-
-
-    def make_env():
-        def _init():
-            env = gym.make(exp.env_name)
-            env = TimeLimit(env, max_episode_steps=exp.n_steps)
-            return env
-        return _init
-
-    env = DummyVecEnv([make_env() for _ in range(exp.n_envs)])
+    # make the env
+    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
     env = VecNormalize(env, norm_reward=True, norm_obs=True)
 
     # parse policy args
