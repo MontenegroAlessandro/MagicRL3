@@ -1,0 +1,52 @@
+wandb:
+  project: rt-a2c-benchmark
+  sync_tensorboard: true
+  tags:
+
+experiment:
+  # ENV
+  env_name: HalfCheetah-v5
+  n_envs: 1
+
+  # Training
+  total_timesteps: 1e6
+  dir_name: results
+  render: false
+  model_save_freq: 10000
+
+  # A2C Parameters
+  policy_type: MlpPolicy
+  learning_rate: 7e-4
+  n_steps: 5
+  gamma: 0.99
+  gae_lambda: 1.0
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  rms_prop_eps: 1e-5
+  use_rms_prop: true
+  use_sde: false
+  sde_sample_freq: -1
+  rollout_buffer_class: null
+  rollout_buffer_kwargs: null
+  normalize_advantage: false
+  stats_window_size: 100
+  tensorboard_log: null
+  policy_kwargs:
+    net_arch: [64, 64]
+  verbose: 0
+  seed: 2026
+  device: cpu
+
+  # Reusing Trajectories
+  window_size: 4
+  on_policy_critic: true
+  weight_type: bh
+
+
+hydra:
+  run:
+    dir: ${experiment.dir_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  sweep:
+    dir: ${hydra.run.dir}
+    subdir: run_${hydra.job.num}

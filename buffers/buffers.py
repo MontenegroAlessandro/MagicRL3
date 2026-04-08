@@ -84,7 +84,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         obs = self.swap_and_flatten(self.observations)
         actions = self.swap_and_flatten(self.actions)
 
-        # Step 1: fill current rollout matrix\
+        # Step 1: fill current rollout matrix
         self._fill_current_all_log_probs(obs, actions)
 
         # Step 2: update history
@@ -108,9 +108,8 @@ class MultiRolloutBuffer(RolloutBuffer):
             past_policy = entry["policy"]
             log_prob = self._eval_log_prob(past_policy, obs, actions)
 
-            self._current_all_log_probs[:, :, i + 1] = log_prob.reshape(
-                self.buffer_size, self.n_envs
-            )
+            self._current_all_log_probs[:, :, i + 1] = self._unflatten_and_swap(log_prob, self.buffer_size, self.n_envs)
+
 
     def _unflatten_and_swap(self, arr, n_steps, n_envs):
         return arr.reshape(n_envs, n_steps, *arr.shape[1:]).swapaxes(0, 1)

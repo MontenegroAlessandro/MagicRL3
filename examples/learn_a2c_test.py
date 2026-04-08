@@ -15,7 +15,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_a2c import RT_A2C
 from buffers.buffers import MultiRolloutBuffer
 
-@hydra.main(version_base=None, config_path="../config/a2c/half-cheetah", config_name="conf_v1")
+@hydra.main(version_base=None, config_path="../config/a2c/", config_name="")
 def main(cfg: DictConfig):
     exp = cfg.experiment
     run_dir = HydraConfig.get().runtime.output_dir
@@ -26,9 +26,12 @@ def main(cfg: DictConfig):
     else:
         base_name = f"A2C {exp.n_envs}x{exp.n_steps}={exp.n_steps * exp.n_envs} lr={exp.learning_rate} ent={exp.ent_coef}"
     
+    wandb_config = OmegaConf.to_container(cfg, resolve=True)
+    wandb_config["base_name"] = base_name
+
     run = wandb.init(
         project=cfg.wandb.project,
-        config=OmegaConf.to_container(cfg, resolve=True),
+        config=wandb_config,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         tags=cfg.wandb.tags,   
         dir=f"{run_dir}/wandb",  
