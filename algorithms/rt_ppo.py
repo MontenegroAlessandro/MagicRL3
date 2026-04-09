@@ -82,7 +82,7 @@ class RT_PPO(PPO):
         log_sum_exp = th.logsumexp(all_log_probs, dim=1)
 
         # normalize using ONLY valid policies
-        log_mean = log_sum_exp - th.log(valid_counts)
+        log_mean = log_sum_exp - th.log(valid_counts.float())
 
         # final ratio
         ratio = th.exp(log_prob - log_mean)
@@ -123,8 +123,15 @@ class RT_PPO(PPO):
                 # Normalize advantage
                 advantages = rollout_data.advantages
                 # Normalization does not make sense if mini batchsize == 1, see GH issue #325
+                # advantage normalization made just on on-policy data
                 if self.normalize_advantage and len(advantages) > 1:
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                    on_mask = rollout_data.on_policy_mask.bool()
+                    if on_mask.sum() > 1:
+                        adv_mean = advantages[on_mask].mean()
+                        adv_std = advantages[on_mask].std() + 1e-8
+                    else:
+                        adv_mean, adv_std = advantages.mean(), advantages.std() + 1e-8
+                    advantages = (advantages - adv_mean) / adv_std
 
                 # ratio between old and new policy, should be one at the first iteration
                 # ratio = th.exp(log_prob - rollout_data.old_log_prob)
@@ -164,11 +171,12 @@ class RT_PPO(PPO):
                 value_losses.append(value_loss.item())
 
                 # Entropy loss favor exploration
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -th.mean(-log_prob)
-                else:
-                    entropy_loss = -th.mean(entropy)
+                if entropy is not None:
+                    on_mask = rollout_data.on_policy_mask.bool()
+                    if on_mask.sum() > 0:
+                        entropy_loss = -entropy[on_mask].mean()
+                    else:
+                        entropy_loss = -entropy.mean()
 
                 entropy_losses.append(entropy_loss.item())
 
@@ -178,6 +186,8 @@ class RT_PPO(PPO):
                 # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
                 # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
                 # and Schulman blog: http://joschu.net/blog/kl-approx.html
+                # NOTE: it is the Schulman's approximation, it incorporates a bit of variamce reduction by exploiting 
+                # NOTE: the second-order taylor expansioon of the KL
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
                     # NOTE: for the RT-PPO, we apply the early stopping criterion not to all data, but just to on-policy 
