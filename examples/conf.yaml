@@ -1,11 +1,11 @@
 wandb:
-  project: rt-ppo-2
+  project: rt-ppo-hc-3
   sync_tensorboard: true
 
 experiment:
   # ENV
   env_name: HalfCheetah-v5
-  n_envs: 1             
+  n_envs: 4             
   total_timesteps: 2e6 
   dir_name: results
   render: false
@@ -13,7 +13,7 @@ experiment:
   # PPO Parameters
   policy_type: MlpPolicy
   learning_rate: 3e-4  
-  n_steps: 512         
+  n_steps: 256         
   batch_size: 64       
   n_epochs: 20         
   gamma: 0.999          
@@ -38,6 +38,6 @@ experiment:
   device: auto
 
   # Reusing Trajectories
-  window_size: 1 
-  on_policy_critic: false
-  weight_type: naive # "naive" or "bh"
+  window_size: 4 
+  on_policy_critic: true
+  weight_type: bh # "naive" or "bh"
