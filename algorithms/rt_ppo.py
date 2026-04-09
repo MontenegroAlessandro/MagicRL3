@@ -35,116 +35,59 @@ class RT_PPO(PPO):
         self.on_policy_critic = on_policy_critic
         self.is_weight_type = is_weight_type
 
-        # deque for the history of policies to be considered when BH is used
-        window_size = self.rollout_buffer.window_length  # set by MultiRolloutBuffer
-        if self.is_weight_type == "bh" and window_size > 1:
-            self._policy_history: deque = deque(maxlen=window_size - 1)
-        else:
-            self._policy_history = None
-
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
         After the standard rollout collection we:
           1. Store log π_current into column 0 of the buffer's all_log_probs.
           2. Evaluate all past policies on the current rollout → fill columns 1..w-1.
           3. Evaluate the current policy on all historical rollouts → append a new column.
-          4. Save the current policy state_dict to _policy_history.
+          4. Save the current policy state_dict to _policy_history (of the buffer).
         """
         # Standard SB3 rollout collection
         result = super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps)
 
+        rollout_trajectories = env.num_envs + int(rollout_buffer.episode_starts[1:].sum())
+        completed_trajectories = int(rollout_buffer.episode_starts[1:].sum()) + int(self._last_episode_starts.sum())
+        self.logger.record("debug/rollout_trajectories", rollout_trajectories)
+        self.logger.record("debug/completed_trajectories", completed_trajectories)
+
+
         if self.rollout_buffer.window_length > 1 and self.is_weight_type == "bh":
-            self._fill_cross_log_probs()
+            self.rollout_buffer.set_current_policy(self.policy)
+            self.rollout_buffer.update_all_log_probs()
 
         return result
-
-    @th.no_grad()
-    def _fill_cross_log_probs(self) -> None:
-        """
-        After a new rollout D_k has been collected:
-          - Column 0 of the current buffer is already filled (SB3 stores log_probs during rollout).
-          - We evaluate π_{k-1}, ..., π_{k-w+1} on D_k  → columns 1..len(history) of current buffer.
-          - We evaluate π_k on D_{k-1}, ..., D_{k-w+1}  → new column appended to each history entry.
-        """
-        buf = self.rollout_buffer
-        self.policy.set_training_mode(False)
-
-        # store the log probs of the current policy for the current rollout into column 0 of the all_log_probs matrix
-        buf.store_current_log_probs(buf.log_probs)
-
-        # evaluate past policies on new data
-        obs_flat = buf.observations.reshape(-1, *buf.observations.shape[2:])   # (N, obs_dim)
-        act_flat = buf.actions.reshape(-1, *buf.actions.shape[2:])             # (N, act_dim)
-
-        obs_tensor = th.tensor(obs_flat, device=self.device)
-        act_tensor = th.tensor(act_flat, dtype=th.float32, device=self.device)
-        if isinstance(self.action_space, spaces.Discrete):
-            act_tensor = act_tensor.long().flatten()
-
-        for policy_idx, past_state_dict in enumerate(reversed(self._policy_history), start=1):
-            # Load past policy weights temporarily
-            current_state_dict = {k: v.clone() for k, v in self.policy.state_dict().items()}
-            self.policy.load_state_dict(past_state_dict)
-
-            _, log_probs_past, _ = self.policy.evaluate_actions(obs_tensor, act_tensor)
-            log_probs_past_np = log_probs_past.cpu().numpy().reshape(
-                buf.buffer_size, buf.n_envs
-            )
-            buf.update_current_cross_log_probs(log_probs_past_np, policy_idx)
-
-            # Restore current policy
-            self.policy.load_state_dict(current_state_dict)
-
-        # evaluate current policy on past data
-        for hist_idx, entry in enumerate(buf.history):
-            hist_obs = entry["observations"].reshape(-1, *buf.observations.shape[2:])
-            hist_act = entry["actions"].reshape(-1, *buf.actions.shape[2:])
-
-            hist_obs_tensor = th.tensor(hist_obs, device=self.device)
-            hist_act_tensor = th.tensor(hist_act, dtype=th.float32, device=self.device)
-            if isinstance(self.action_space, spaces.Discrete):
-                hist_act_tensor = hist_act_tensor.long().flatten()
-
-            _, log_probs_current, _ = self.policy.evaluate_actions(
-                hist_obs_tensor, hist_act_tensor
-            )
-            buf.update_past_log_probs(
-                log_probs_current.cpu().numpy(), history_idx=hist_idx
-            )
-
-        self._policy_history.append(
-            {k: v.cpu().clone() for k, v in self.policy.state_dict().items()}
-        )
-
-        self.policy.set_training_mode(True)
 
     def _compute_ratio(
         self,
         log_prob: th.Tensor,
         rollout_data,
     ) -> th.Tensor:
-        """
-        Compute the IS ratio for the policy loss.
-        """
+
         if self.is_weight_type == "naive" or self.rollout_buffer.window_length == 1:
             return th.exp(log_prob - rollout_data.old_log_prob)
+
+        all_log_probs = rollout_data.all_log_probs  # (batch, w)
         
-        all_log_probs = rollout_data.all_log_probs          # (batch, w)
-        w = all_log_probs.shape[1]
+        # mask valid entries (-inf = invalid)
+        valid_mask = th.isfinite(all_log_probs)  # (batch, w)
 
-        # Mask -inf columns (not yet filled) so they don't contribute to logsumexp
-        # Replace -inf with a very large negative number that still registers as zero
-        # probability but avoids NaN gradients.
-        valid_mask = ~th.isinf(all_log_probs)               # (batch, w)
-        n_valid = valid_mask.float().sum(dim=1, keepdim=True).clamp(min=1.0)
+        # count valid policies per sample
+        valid_counts = valid_mask.sum(dim=1)  # (batch,)
 
-        # logsumexp over valid columns only
-        masked = all_log_probs.masked_fill(~valid_mask, -1e9)
-        log_sum_pi = th.logsumexp(masked, dim=1)            # (batch,)
+        # avoid division by zero (just in case)
+        valid_counts = th.clamp(valid_counts, min=1)
 
-        # BH ratio
-        log_ratio_bh = log_prob + th.log(n_valid.squeeze(1)) - log_sum_pi
-        return th.exp(log_ratio_bh)
+        # logsumexp automatically ignores -inf
+        log_sum_exp = th.logsumexp(all_log_probs, dim=1)
+
+        # normalize using ONLY valid policies
+        log_mean = log_sum_exp - th.log(valid_counts)
+
+        # final ratio
+        ratio = th.exp(log_prob - log_mean)
+
+        return ratio
 
     def train(self) -> None:
         """
@@ -237,7 +180,7 @@ class RT_PPO(PPO):
                 # and Schulman blog: http://joschu.net/blog/kl-approx.html
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
-                    # NOTE: for the RT-PPO, we apply the early stopping criterion to all data, not just the on-policy 
+                    # NOTE: for the RT-PPO, we apply the early stopping criterion not to all data, but just to on-policy 
                     # data, since the old log probs of the off-policy data will lead a.s. to high KL divergence
                     # this is done to defend against unlucky sampling
                     on_policy_mask = rollout_data.on_policy_mask.bool()

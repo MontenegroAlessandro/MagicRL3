@@ -38,13 +38,14 @@ def main(cfg: DictConfig):
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
 
     # learn
+    batch_size = exp.batch_size if exp.batch_size is not None else exp.n_steps * exp.n_envs * exp.window_size
     if exp.window_size == 1:
         model = PPO(
             policy=exp.policy_type,
             env=env,
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
-            batch_size=exp.batch_size,
+            batch_size=batch_size,
             n_epochs=exp.n_epochs,
             gamma=exp.gamma,
             gae_lambda=exp.gae_lambda,
@@ -78,7 +79,7 @@ def main(cfg: DictConfig):
             env=env,
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
-            batch_size=exp.batch_size,
+            batch_size=batch_size,
             n_epochs=exp.n_epochs,
             gamma=exp.gamma,
             gae_lambda=exp.gae_lambda,
