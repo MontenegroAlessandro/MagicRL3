@@ -123,9 +123,12 @@ class RT_PPO(PPO):
         else:
             window_ids = [None]
 
+        early_stop_condition_total_by_window = {wid: 0 for wid in window_ids}
+        early_stop_condition_true_by_window = {wid: 0 for wid in window_ids}
+        approx_kl_divs_by_window = {wid: [] for wid in window_ids}
+
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            approx_kl_divs = []
             kl_triggered_windows = set()  # tracks which window_ids hit the KL threshold this epoch
 
             for wid in window_ids:
@@ -224,9 +227,11 @@ class RT_PPO(PPO):
                             else:
                                 # No on-policy samples in this minibatch — skip early stopping
                                 approx_kl_div = 0.0
-                        approx_kl_divs.append(approx_kl_div)
+                        approx_kl_divs_by_window[wid].append(float(approx_kl_div))
 
                     if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                        early_stop_condition_total_by_window[wid] += 1
+                        early_stop_condition_true_by_window[wid] += 1
                         if self.verbose >= 1:
                             if self.sequential_window_training:
                                 print(
@@ -241,6 +246,8 @@ class RT_PPO(PPO):
                         else:
                             continue_training = False
                         break
+                    elif self.target_kl is not None:
+                        early_stop_condition_total_by_window[wid] += 1
 
                     # Optimization step
                     self.policy.optimizer.zero_grad()
@@ -263,10 +270,26 @@ class RT_PPO(PPO):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
+        for wid in window_ids:
+            approx_kl_values = approx_kl_divs_by_window[wid]
+            approx_kl_metric_suffix = f"window_{wid}" if wid is not None else "window_all"
+            approx_kl_mean = float(np.mean(approx_kl_values)) if len(approx_kl_values) > 0 else 0.0
+            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_mean", approx_kl_mean)
+            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_count", len(approx_kl_values))
+
+            denominator = early_stop_condition_total_by_window[wid]
+            early_stop_true_pct = (
+                100.0 * early_stop_condition_true_by_window[wid] / denominator if denominator > 0 else 0.0
+            )
+            metric_name = (
+                f"debug/early_stopping_condition_true_pct_window_{wid}"
+                if wid is not None
+                else "debug/early_stopping_condition_true_pct_window_all"
+            )
+            self.logger.record(metric_name, early_stop_true_pct)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
