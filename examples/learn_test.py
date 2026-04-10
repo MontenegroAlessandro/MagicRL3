@@ -19,9 +19,9 @@ def main(cfg: DictConfig):
 
     # logger
     if exp.window_size > 1:
-        base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type}"
+        base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl}"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs}"
+        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl}"
     run = wandb.init(
         project=cfg.wandb.project,
         config=OmegaConf.to_container(cfg, resolve=True),
@@ -74,6 +74,7 @@ def main(cfg: DictConfig):
                 use_bh=(exp.weight_type == "bh"),
             ),
             is_weight_type=exp.weight_type,
+            sequential_window_training=exp.sequential_window_training,
             # Old PPO args
             policy=exp.policy_type,
             env=env,

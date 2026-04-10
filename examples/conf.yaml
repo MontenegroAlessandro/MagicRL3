@@ -41,3 +41,4 @@ experiment:
   window_size: 4 
   on_policy_critic: true
   weight_type: bh # "naive" or "bh"
+  sequential_window_training: true

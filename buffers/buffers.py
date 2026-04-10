@@ -175,7 +175,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         super().reset()
 
 
-    def get(self, batch_size=None):
+    def get(self, batch_size=None, window_id: Optional[int] = None):
         '''
         Current situation:
         - in self we have the current rollout (observations, actions, returns, etc)
@@ -238,15 +238,24 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         # Yield minibatches from the combined dataset
         total_size = self._combined_tensors["observations"].shape[0]
-        indices = np.random.permutation(total_size)
 
+        if window_id is not None:
+            valid_mask = self._combined_tensors["window_id"] == window_id
+            candidate_indices = np.where(valid_mask)[0]
+        else:
+            candidate_indices = np.arange(total_size)
+
+        indices = np.random.permutation(candidate_indices)
+
+        n_samples = len(indices)
         if batch_size is None:
-            batch_size = total_size
+            batch_size = n_samples
 
         start_idx = 0
-        while start_idx < total_size:
+        while start_idx < n_samples:
             yield self._get_combined_samples(indices[start_idx : start_idx + batch_size])
             start_idx += batch_size
+
 
 
     def _get_combined_samples(self, batch_inds: np.ndarray) -> RTRolloutBufferSamples:
