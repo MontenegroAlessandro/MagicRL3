@@ -126,6 +126,7 @@ class RT_PPO(PPO):
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
             approx_kl_divs = []
+            kl_triggered_windows = set()  # tracks which window_ids hit the KL threshold this epoch
 
             for wid in window_ids:
                 # Do a complete pass on the rollout buffer (optionally filtered by window)
@@ -226,7 +227,6 @@ class RT_PPO(PPO):
                         approx_kl_divs.append(approx_kl_div)
 
                     if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                        continue_training = False
                         if self.verbose >= 1:
                             if self.sequential_window_training:
                                 print(
@@ -235,9 +235,11 @@ class RT_PPO(PPO):
                                 )
                             else:
                                 print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
-                        # In sequential mode this breaks the mini-batch loop for the current
-                        # window; the outer window loop continues to the next (older) window.
-                        # In mixed mode this breaks the only inner loop; epoch loop breaks below.
+                        if self.sequential_window_training:
+                            # Record the violation and move on to the next (older) window.
+                            kl_triggered_windows.add(wid)
+                        else:
+                            continue_training = False
                         break
 
                     # Optimization step
@@ -246,6 +248,10 @@ class RT_PPO(PPO):
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()
+
+            # In sequential mode, only stop training if every window hit the KL threshold.
+            if self.sequential_window_training and kl_triggered_windows == set(window_ids):
+                continue_training = False
 
             self._n_updates += 1
             if not continue_training:
