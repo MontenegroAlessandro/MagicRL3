@@ -22,9 +22,11 @@ def main(cfg: DictConfig):
         base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl}"
     else:
         base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl}"
+    conf = OmegaConf.to_container(cfg, resolve=True)
+    conf["group"] = base_name
     run = wandb.init(
         project=cfg.wandb.project,
-        config=OmegaConf.to_container(cfg, resolve=True),
+        config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,                       
         name=f"{base_name} seed={exp.seed}",   
