@@ -149,6 +149,30 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         return log_prob.cpu().numpy()
 
+    def recompute_advantages(self, policy) -> None:
+        """
+        Replace stored advantages for off-policy windows with: 
+            A(s, a, φ_current) = returns - V_φ_current(s)
+        Only touches window_id > 0 entries in _combined_tensors.
+        Window 0 is left untouched (already correct).
+        NOTE: returns are stale!
+        """
+        assert self.generator_ready, "Call get() first to build _combined_tensors"
+
+        off_policy_mask = self._combined_tensors["window_id"] > 0  # numpy bool array
+        if not off_policy_mask.any():
+            return
+
+        obs = self._combined_tensors["observations"][off_policy_mask]
+        returns = self._combined_tensors["returns"][off_policy_mask]
+
+        obs_t = th.as_tensor(obs).to(policy.device)
+        with th.no_grad():
+            fresh_values = policy.predict_values(obs_t).cpu().numpy().flatten()
+
+        new_advantages = (returns.flatten() - fresh_values).reshape(-1, 1)
+        self._combined_tensors["advantages"][off_policy_mask] = new_advantages
+    
     def reset(self) -> None:
         if self.full and self.window_length > 1:
             entry = {

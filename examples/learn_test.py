@@ -19,9 +19,12 @@ def main(cfg: DictConfig):
 
     # logger
     if exp.window_size > 1:
-        base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl}"
+        if not exp.sequential_window_training and not exp.fresh_adv:
+            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} batch_size={exp.batch_size}"
+        else:
+            base_name = f"RT-PPO (seq={exp.sequential_window_training}, fresh_adv={exp.fresh_adv}) w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} batch_size={exp.batch_size}"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl}"
+        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} batch_size={exp.batch_size}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
@@ -77,6 +80,7 @@ def main(cfg: DictConfig):
             ),
             is_weight_type=exp.weight_type,
             sequential_window_training=exp.sequential_window_training,
+            fresh_adv=exp.fresh_adv,
             # Old PPO args
             policy=exp.policy_type,
             env=env,

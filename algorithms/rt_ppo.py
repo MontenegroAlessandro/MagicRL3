@@ -23,6 +23,7 @@ class RT_PPO(PPO):
             on_policy_critic: bool = True,
             is_weight_type: IS_WEIGHT_TYPE = "naive",
             sequential_window_training: bool = False,
+            fresh_adv: bool = False,
             *args,
             **kwargs,
         ):
@@ -40,6 +41,7 @@ class RT_PPO(PPO):
         self.on_policy_critic = on_policy_critic
         self.is_weight_type = is_weight_type
         self.sequential_window_training = sequential_window_training
+        self.fresh_adv = fresh_adv
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
@@ -126,6 +128,14 @@ class RT_PPO(PPO):
         early_stop_condition_total_by_window = {wid: 0 for wid in window_ids}
         early_stop_condition_true_by_window = {wid: 0 for wid in window_ids}
         approx_kl_divs_by_window = {wid: [] for wid in window_ids}
+
+        # update advantages
+        if self.fresh_adv:
+            _gen = self.rollout_buffer.get(self.batch_size)  # just triggers generator_ready
+            next(_gen)
+            del _gen
+            if self.rollout_buffer.window_length > 1:
+                self.rollout_buffer.recompute_advantages(self.policy)
 
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):

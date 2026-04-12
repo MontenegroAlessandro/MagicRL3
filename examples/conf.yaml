@@ -6,7 +6,7 @@ experiment:
   # ENV
   env_name: HalfCheetah-v5
   n_envs: 1 # 4             
-  total_timesteps: 2e6 
+  total_timesteps: 1e6 
   dir_name: results
   render: false
   
@@ -21,7 +21,7 @@ experiment:
   clip_range: 0.2      
   clip_range_vf: null
   normalize_advantage: true 
-  ent_coef: 0.01            
+  ent_coef: 0.0            
   vf_coef: 0.5             
   max_grad_norm: 0.5       
   use_sde: false
@@ -42,3 +42,4 @@ experiment:
   on_policy_critic: true
   weight_type: naive # "naive" or "bh"
   sequential_window_training: false # true
+  fresh_adv: false # true
