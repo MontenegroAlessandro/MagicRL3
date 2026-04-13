@@ -46,8 +46,6 @@ class MultiRolloutBuffer(RolloutBuffer):
         # super class init
         super().__init__(*args, **kwargs)
 
-
-
     def set_current_policy(self, policy):
         # Store a frozen copy of the policy directly on the correct device
         policy_copy = copy.deepcopy(policy)
@@ -55,7 +53,6 @@ class MultiRolloutBuffer(RolloutBuffer):
         policy_copy.set_training_mode(False)
 
         self._current_policy = policy_copy
-
 
     def update_all_log_probs(self):
         """
@@ -90,7 +87,6 @@ class MultiRolloutBuffer(RolloutBuffer):
         # Step 2: update history
         self._update_history_all_log_probs()
 
-
     def _fill_current_all_log_probs(self, obs, actions):
         """
         Fill self._current_all_log_probs with:
@@ -110,10 +106,9 @@ class MultiRolloutBuffer(RolloutBuffer):
 
             self._current_all_log_probs[:, :, i + 1] = self._unflatten_and_swap(log_prob, self.buffer_size, self.n_envs)
 
-
     def _unflatten_and_swap(self, arr, n_steps, n_envs):
+        # utility function to revert the flattening and swapping done in swap_and_flatten by SB3
         return arr.reshape(n_envs, n_steps, *arr.shape[1:]).swapaxes(0, 1)
-
 
     def _update_history_all_log_probs(self):
         """
@@ -139,7 +134,6 @@ class MultiRolloutBuffer(RolloutBuffer):
             # truncate to window size
             entry["all_log_probs"] = entry["all_log_probs"][:, :self.window_length]
 
-
     def _eval_log_prob(self, policy, obs, actions):
         """
         Evaluate log π(a|s) for a given policy on numpy inputs.
@@ -155,7 +149,30 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         return log_prob.cpu().numpy()
 
+    def recompute_advantages(self, policy) -> None:
+        """
+        Replace stored advantages for off-policy windows with: 
+            A(s, a, φ_current) = returns - V_φ_current(s)
+        Only touches window_id > 0 entries in _combined_tensors.
+        Window 0 is left untouched (already correct).
+        NOTE: returns are stale!
+        """
+        assert self.generator_ready, "Call get() first to build _combined_tensors"
 
+        off_policy_mask = self._combined_tensors["window_id"] > 0  # numpy bool array
+        if not off_policy_mask.any():
+            return
+
+        obs = self._combined_tensors["observations"][off_policy_mask]
+        returns = self._combined_tensors["returns"][off_policy_mask]
+
+        obs_t = th.as_tensor(obs).to(policy.device)
+        with th.no_grad():
+            fresh_values = policy.predict_values(obs_t).cpu().numpy().flatten()
+
+        new_advantages = (returns.flatten() - fresh_values).reshape(-1, 1)
+        self._combined_tensors["advantages"][off_policy_mask] = new_advantages
+    
     def reset(self) -> None:
         if self.full and self.window_length > 1:
             entry = {
@@ -182,7 +199,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         super().reset()
 
 
-    def get(self, batch_size=None):
+    def get(self, batch_size=None, window_id: Optional[int] = None):
         '''
         Current situation:
         - in self we have the current rollout (observations, actions, returns, etc)
@@ -197,9 +214,9 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         assert self.full, "Rollout buffer must be full before sampling from it"
 
-        if not self.generator_ready:
-            _tensor_names = ["observations", "actions", "values", "log_probs", "advantages", "returns"]
+        _tensor_names = ["observations", "actions", "values", "log_probs", "advantages", "returns"]
 
+        if not self.generator_ready:
             # Flatten current buffer arrays
             for tensor in _tensor_names:
                 self.__dict__[tensor] = self.swap_and_flatten(self.__dict__[tensor])
@@ -210,51 +227,60 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         current_size = self.__dict__["observations"].shape[0]
 
-        # If no history, just link the combined tensors to the current arrays
-        if self.window_length == 1 or len(self.history) == 0:
-            for tensor in _tensor_names:
-                self._combined_tensors[tensor] = self.__dict__[tensor]
+            # If no history, just link the combined tensors to the current arrays
+            if self.window_length == 1 or len(self.history) == 0:
+                for tensor in _tensor_names:
+                    self._combined_tensors[tensor] = self.__dict__[tensor]
 
-            # All samples are on-policy
-            self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
-            self._combined_tensors["window_id"] = np.zeros(current_size, dtype=np.float32)
-            
-            if self.use_bh:
-                self._combined_tensors["all_log_probs"] = self._current_all_log_probs
+                # All samples are on-policy
+                self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
+                self._combined_tensors["window_id"] = np.zeros(current_size, dtype=np.float32)
 
-        else:
-            for tensor in _tensor_names:
-                tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
-                self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
+                if self.use_bh:
+                    self._combined_tensors["all_log_probs"] = self._current_all_log_probs
 
-            # Build on-policy mask: 1.0 for current, 0.0 for past
-            total_size = self._combined_tensors["observations"].shape[0]
-            mask = np.zeros(total_size, dtype=np.float32)
-            mask[:current_size] = 1.0
-            self._combined_tensors["on_policy_mask"] = mask
+            else:
+                for tensor in _tensor_names:
+                    tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
+                    self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
 
-            # Build window_id: 0 for current, 1 for previous, ... , w-1 for oldest in the window  
-            window_ids = np.zeros(current_size, dtype=np.float32)  # current rollout = 0 
-            for i, h in enumerate(self.history):  
-                size = h["observations"].shape[0]  
-                window_ids = np.concatenate([window_ids, np.full(size, i + 1, dtype=np.int32)])  
-            self._combined_tensors["window_id"] = window_ids 
-            
-            if self.use_bh:
-                all_log_probs_to_concat = [self._current_all_log_probs] + [h["all_log_probs"] for h in self.history]
-                self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
+                # Build on-policy mask: 1.0 for current, 0.0 for past
+                total_size = self._combined_tensors["observations"].shape[0]
+                mask = np.zeros(total_size, dtype=np.float32)
+                mask[:current_size] = 1.0
+                self._combined_tensors["on_policy_mask"] = mask
+
+                # Build window_id: 0 for current, 1 for previous, ... , w-1 for oldest in the window
+                window_ids = np.zeros(current_size, dtype=np.float32)  # current rollout = 0
+                for i, h in enumerate(self.history):
+                    size = h["observations"].shape[0]
+                    window_ids = np.concatenate([window_ids, np.full(size, i + 1, dtype=np.float32)])
+                self._combined_tensors["window_id"] = window_ids
+
+                if self.use_bh:
+                    all_log_probs_to_concat = [self._current_all_log_probs] + [h["all_log_probs"] for h in self.history]
+                    self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
 
         # Yield minibatches from the combined dataset
         total_size = self._combined_tensors["observations"].shape[0]
-        indices = np.random.permutation(total_size)
 
+        if window_id is not None:
+            valid_mask = self._combined_tensors["window_id"] == window_id
+            candidate_indices = np.where(valid_mask)[0]
+        else:
+            candidate_indices = np.arange(total_size)
+
+        indices = np.random.permutation(candidate_indices)
+
+        n_samples = len(indices)
         if batch_size is None:
-            batch_size = total_size
+            batch_size = n_samples
 
         start_idx = 0
-        while start_idx < total_size:
+        while start_idx < n_samples:
             yield self._get_combined_samples(indices[start_idx : start_idx + batch_size])
             start_idx += batch_size
+
 
 
     def _get_combined_samples(self, batch_inds: np.ndarray) -> RTRolloutBufferSamples:
