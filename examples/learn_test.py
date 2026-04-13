@@ -20,11 +20,11 @@ def main(cfg: DictConfig):
     # logger
     if exp.window_size > 1:
         if not exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} batch_size={exp.batch_size}"
+            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
         else:
-            base_name = f"RT-PPO (seq={exp.sequential_window_training}, fresh_adv={exp.fresh_adv}) w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} batch_size={exp.batch_size}"
+            base_name = f"RT-PPO (seq={exp.sequential_window_training}, fresh_adv={exp.fresh_adv}) w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} batch_size={exp.batch_size}"
+        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
@@ -42,8 +42,9 @@ def main(cfg: DictConfig):
     # parse policy args
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
 
-    # learn
-    batch_size = exp.batch_size if exp.batch_size is not None else exp.n_steps * exp.n_envs * exp.window_size
+    # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
+    # batch_size is always based on the on-policy data size (n_steps * n_envs) regardless of window.
+    batch_size = (exp.n_steps * exp.n_envs) // exp.n_minibatch
     if exp.window_size == 1:
         model = PPO(
             policy=exp.policy_type,

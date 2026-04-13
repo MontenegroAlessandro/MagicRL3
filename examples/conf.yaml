@@ -14,7 +14,7 @@ experiment:
   policy_type: MlpPolicy
   learning_rate: 3e-4  
   n_steps: 2048 # 256         
-  batch_size: 64       
+  n_minibatch: 32
   n_epochs: 10         
   gamma: 0.99          
   gae_lambda: 0.95     
