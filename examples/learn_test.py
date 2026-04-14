@@ -25,8 +25,12 @@ def main(cfg: DictConfig):
     if exp.window_size > 1:
         if not exp.sequential_window_training and not exp.fresh_adv:
             base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+        elif exp.sequential_window_training and not exp.fresh_adv:
+            base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+        elif exp.sequential_window_training and exp.fresh_adv:
+            base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
         else:
-            base_name = f"RT-PPO (seq={exp.sequential_window_training}, fresh_adv={exp.fresh_adv}) w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+            base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
     else:
         base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
     conf = OmegaConf.to_container(cfg, resolve=True)

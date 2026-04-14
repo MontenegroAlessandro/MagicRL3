@@ -198,7 +198,6 @@ class MultiRolloutBuffer(RolloutBuffer):
         self._combined_tensors.clear()
         super().reset()
 
-
     def get(self, batch_size=None, window_id: Optional[int] = None):
         '''
         Current situation:
