@@ -35,7 +35,9 @@ experiment:
     net_arch: [64, 64]   
   verbose: 0
   seed: 2026
-  device: auto
+  device: cpu
+  eval_freq: 10000
+  n_eval_episodes: 10
 
   # Reusing Trajectories
   window_size: 1 

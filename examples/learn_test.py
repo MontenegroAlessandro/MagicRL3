@@ -2,6 +2,7 @@ import gymnasium as gym
 from stable_baselines3 import A2C, PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.callbacks import EvalCallback, CallbackList
 import wandb
 from wandb.integration.sb3 import WandbCallback
 import hydra
@@ -12,6 +13,17 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
+
+# class WandbEvalCallback(EvalCallback):
+#     def _on_step(self) -> bool:
+#         result = super()._on_step()
+#         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+#             wandb.log({
+#                 "eval/mean_reward": self.last_mean_reward,
+#                 "eval/mean_ep_length": getattr(self, "last_mean_ep_length", None),
+#                 "global_step": self.num_timesteps,
+#             })
+#         return result
 
 @hydra.main(version_base=None, config_path=".", config_name="conf")
 def main(cfg: DictConfig):
@@ -35,20 +47,29 @@ def main(cfg: DictConfig):
         base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
+    # wandb.tensorboard.patch(root_logdir=f"{exp.dir_name}/runs")
     run = wandb.init(
         project=cfg.wandb.project,
         config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
-        group=base_name,                       
-        name=f"{base_name} seed={exp.seed}",   
+        group=base_name,
+        name=f"{base_name} seed={exp.seed}",
+        # reinit=True,
     )
 
-    # make the env
+    # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
     env = VecNormalize(env, norm_reward=True, norm_obs=True)
 
+    # --- Eval env ---
+    # norm_reward=False: we want raw undiscounted returns for fair comparison across runs.
+    # norm_obs=True: obs normalization is kept in sync with training via sync_envs_normalization.
+    # n_envs=1: EvalCallback runs episodes sequentially so parallelism does not help here.
+    eval_env = make_vec_env(exp.env_name, n_envs=1, seed=exp.seed + 1000)
+    eval_env = VecNormalize(eval_env, norm_reward=False, norm_obs=True, training=False)
+
     # parse policy args
-    policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+    policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
 
     if exp.window_size == 1:
         model = PPO(
@@ -112,28 +133,44 @@ def main(cfg: DictConfig):
             seed=exp.seed,
             device=exp.device
         )
+
+    # --- Callbacks ---
+    # eval_callback = WandbEvalCallback(
+    #     eval_env,
+    #     best_model_save_path=f"{exp.dir_name}/models/{run.id}/best",
+    #     # log_path=f"{exp.dir_name}/eval/{run.id}",
+    #     eval_freq=max(exp.eval_freq // exp.n_envs, 1),  # eval_freq is in total steps; divide by n_envs for vec env
+    #     n_eval_episodes=exp.n_eval_episodes,
+    #     deterministic=True,
+    #     render=False,
+    #     verbose=0,
+    #     # sync_envs_normalization=True,  # keeps eval obs normalization stats in sync with training env
+    # )
+
+    wandb_callback = WandbCallback(
+        model_save_path=f"{exp.dir_name}/models/{run.id}",
+        verbose=2,
+    )
+
     model.learn(
         total_timesteps=int(exp.total_timesteps),
         progress_bar=True,
-        callback=WandbCallback(
-            model_save_path=f"{exp.dir_name}/models/{run.id}",
-            verbose=2,
-        ),
+        callback=CallbackList([wandb_callback]),
+        # callback=CallbackList([eval_callback, wandb_callback]),
     )
     model.save(f"{exp.dir_name}/ppo_halfcheetah")
 
     # evaluate
     if exp.render:
-        eval_env = gym.make(exp.env_name, render_mode="human")
-        obs, info = eval_env.reset()
+        eval_env_render = gym.make(exp.env_name, render_mode="human")
+        obs, info = eval_env_render.reset()
         for i in range(1000):
             action, _state = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = eval_env.step(action)
+            obs, reward, terminated, truncated, info = eval_env_render.step(action)
             if terminated or truncated:
-                obs, info = eval_env.reset()
-        eval_env.close()
-    
-    # close the wandb run
+                obs, info = eval_env_render.reset()
+        eval_env_render.close()
+
     wandb.finish()
 
 
