@@ -1,10 +1,11 @@
 wandb:
   project: rt-ppo-hc-3
   sync_tensorboard: true
+  tags: null
 
 experiment:
   # ENV
-  env_name: HalfCheetah-v5
+  env_name: 
   n_envs: 1 # 4             
   total_timesteps: 1e6 
   dir_name: results
@@ -32,10 +33,9 @@ experiment:
   stats_window_size: 100
   tensorboard_log: null
   policy_kwargs: 
-    net_arch: [64, 64]   
   verbose: 0
   seed: 2026
-  device: auto
+  device: cpu
 
   # Reusing Trajectories
   window_size: 1 

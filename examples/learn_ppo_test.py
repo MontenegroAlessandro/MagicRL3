@@ -14,26 +14,34 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
 
-@hydra.main(version_base=None, config_path=".", config_name="conf")
+@hydra.main(version_base=None, config_path="../config/ppo", config_name="")
 def main(cfg: DictConfig):
     exp = cfg.experiment
 
+    # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
+    # batch_size is always based on the on-policy data size (n_steps * n_envs * window_size).
+    batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
+    n_updates = exp.n_epochs * exp.n_minibatch
+
     # logger
+    ppo_info = f"{exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps} epochs={exp.n_epochs} n_minibatch={exp.n_minibatch} batch_size={batch_size} n_updates={n_updates} kl_target={exp.target_kl}"
     if exp.window_size > 1:
-        if not exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
-        else:
-            base_name = f"RT-PPO (seq={exp.sequential_window_training}, fresh_adv={exp.fresh_adv}) w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
+        base_name = f"RT-PPO {ppo_info} w={exp.window_size} opc={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl}"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch}"
+        base_name = f"PPO {ppo_info}"
+    
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
+    conf["n_updates"] = n_updates
+    conf["batch_size"] = batch_size
+
     run = wandb.init(
         project=cfg.wandb.project,
         config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,                       
-        name=f"{base_name} seed={exp.seed}",   
+        name=f"{base_name} seed={exp.seed}",  
+        tags=cfg.wandb.tags, 
     )
 
     # make the env
