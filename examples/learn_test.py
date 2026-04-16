@@ -13,21 +13,34 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
+import torch.nn as nn
 
-# class WandbEvalCallback(EvalCallback):
-#     def _on_step(self) -> bool:
-#         result = super()._on_step()
-#         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-#             wandb.log({
-#                 "eval/mean_reward": self.last_mean_reward,
-#                 "eval/mean_ep_length": getattr(self, "last_mean_ep_length", None),
-#                 "global_step": self.num_timesteps,
-#             })
-#         return result
+ACTIVATION_FNS = {
+    "nn.ReLU": nn.ReLU,
+    "nn.Tanh": nn.Tanh,
+    "nn.ELU": nn.ELU,
+    "nn.LeakyReLU": nn.LeakyReLU,
+    "nn.Sigmoid": nn.Sigmoid,
+}
 
 @hydra.main(version_base=None, config_path=".", config_name="conf")
 def main(cfg: DictConfig):
     exp = cfg.experiment
+
+    # parse policy args
+    policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+
+    if policy_kwargs is not None and isinstance(policy_kwargs.get("activation_fn"), str):
+        key = policy_kwargs["activation_fn"]
+        if key not in ACTIVATION_FNS:
+            raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(ACTIVATION_FNS.keys())}")
+        policy_kwargs["activation_fn"] = ACTIVATION_FNS[key]
+
+    if policy_kwargs is not None and policy_kwargs.get("log_std_init") is None:
+        policy_kwargs.pop("log_std_init", None)  # SB3 doesn't accept None for this
+
+    if policy_kwargs is not None and policy_kwargs.get("activation_fn") is None:
+        policy_kwargs.pop("activation_fn", None)  # same: None is not a valid class
 
     # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
     # batch_size is always based on the on-policy data size (n_steps * n_envs * window_size).
@@ -47,29 +60,32 @@ def main(cfg: DictConfig):
         base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
-    # wandb.tensorboard.patch(root_logdir=f"{exp.dir_name}/runs")
     run = wandb.init(
         project=cfg.wandb.project,
         config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,
         name=f"{base_name} seed={exp.seed}",
-        # reinit=True,
     )
 
     # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
     env = VecNormalize(env, norm_reward=True, norm_obs=True)
 
-    # --- Eval env ---
-    # norm_reward=False: we want raw undiscounted returns for fair comparison across runs.
-    # norm_obs=True: obs normalization is kept in sync with training via sync_envs_normalization.
-    # n_envs=1: EvalCallback runs episodes sequentially so parallelism does not help here.
-    eval_env = make_vec_env(exp.env_name, n_envs=1, seed=exp.seed + 1000)
-    eval_env = VecNormalize(eval_env, norm_reward=False, norm_obs=True, training=False)
-
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+
+    if policy_kwargs is not None and isinstance(policy_kwargs.get("activation_fn"), str):
+        key = policy_kwargs["activation_fn"]
+        if key not in ACTIVATION_FNS:
+            raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(ACTIVATION_FNS.keys())}")
+        policy_kwargs["activation_fn"] = ACTIVATION_FNS[key]
+
+    if policy_kwargs is not None and policy_kwargs.get("log_std_init") is None:
+        policy_kwargs.pop("log_std_init", None)  # SB3 doesn't accept None for this
+
+    if policy_kwargs is not None and policy_kwargs.get("activation_fn") is None:
+        policy_kwargs.pop("activation_fn", None)  # same: None is not a valid class
 
     if exp.window_size == 1:
         model = PPO(
@@ -134,19 +150,6 @@ def main(cfg: DictConfig):
             device=exp.device
         )
 
-    # --- Callbacks ---
-    # eval_callback = WandbEvalCallback(
-    #     eval_env,
-    #     best_model_save_path=f"{exp.dir_name}/models/{run.id}/best",
-    #     # log_path=f"{exp.dir_name}/eval/{run.id}",
-    #     eval_freq=max(exp.eval_freq // exp.n_envs, 1),  # eval_freq is in total steps; divide by n_envs for vec env
-    #     n_eval_episodes=exp.n_eval_episodes,
-    #     deterministic=True,
-    #     render=False,
-    #     verbose=0,
-    #     # sync_envs_normalization=True,  # keeps eval obs normalization stats in sync with training env
-    # )
-
     wandb_callback = WandbCallback(
         model_save_path=f"{exp.dir_name}/models/{run.id}",
         verbose=2,
@@ -156,7 +159,6 @@ def main(cfg: DictConfig):
         total_timesteps=int(exp.total_timesteps),
         progress_bar=True,
         callback=CallbackList([wandb_callback]),
-        # callback=CallbackList([eval_callback, wandb_callback]),
     )
     model.save(f"{exp.dir_name}/ppo_halfcheetah")
 
