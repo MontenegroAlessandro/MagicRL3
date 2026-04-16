@@ -15,32 +15,9 @@ from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
 import torch.nn as nn
 
-ACTIVATION_FNS = {
-    "nn.ReLU": nn.ReLU,
-    "nn.Tanh": nn.Tanh,
-    "nn.ELU": nn.ELU,
-    "nn.LeakyReLU": nn.LeakyReLU,
-    "nn.Sigmoid": nn.Sigmoid,
-}
-
 @hydra.main(version_base=None, config_path=".", config_name="conf")
 def main(cfg: DictConfig):
     exp = cfg.experiment
-
-    # parse policy args
-    policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
-
-    if policy_kwargs is not None and isinstance(policy_kwargs.get("activation_fn"), str):
-        key = policy_kwargs["activation_fn"]
-        if key not in ACTIVATION_FNS:
-            raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(ACTIVATION_FNS.keys())}")
-        policy_kwargs["activation_fn"] = ACTIVATION_FNS[key]
-
-    if policy_kwargs is not None and policy_kwargs.get("log_std_init") is None:
-        policy_kwargs.pop("log_std_init", None)  # SB3 doesn't accept None for this
-
-    if policy_kwargs is not None and policy_kwargs.get("activation_fn") is None:
-        policy_kwargs.pop("activation_fn", None)  # same: None is not a valid class
 
     # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
     # batch_size is always based on the on-policy data size (n_steps * n_envs * window_size).
@@ -74,18 +51,6 @@ def main(cfg: DictConfig):
 
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
-
-    if policy_kwargs is not None and isinstance(policy_kwargs.get("activation_fn"), str):
-        key = policy_kwargs["activation_fn"]
-        if key not in ACTIVATION_FNS:
-            raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(ACTIVATION_FNS.keys())}")
-        policy_kwargs["activation_fn"] = ACTIVATION_FNS[key]
-
-    if policy_kwargs is not None and policy_kwargs.get("log_std_init") is None:
-        policy_kwargs.pop("log_std_init", None)  # SB3 doesn't accept None for this
-
-    if policy_kwargs is not None and policy_kwargs.get("activation_fn") is None:
-        policy_kwargs.pop("activation_fn", None)  # same: None is not a valid class
 
     if exp.window_size == 1:
         model = PPO(
