@@ -9,6 +9,8 @@ experiment:
   total_timesteps: 1e6 
   dir_name: results
   render: false
+  normalize_obs: true
+  normalize_reward: false
   
   # PPO Parameters
   policy_type: MlpPolicy
