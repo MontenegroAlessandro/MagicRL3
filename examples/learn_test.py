@@ -52,7 +52,7 @@ def main(cfg: DictConfig):
 
     # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs)
+    env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma)
 
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
