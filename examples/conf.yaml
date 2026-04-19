@@ -13,7 +13,8 @@ experiment:
   # PPO Parameters
   policy_type: MlpPolicy
   learning_rate: 3e-4  
-  n_steps: 2048 # 256         
+  n_steps: 2048 # 256  
+  batch_size: null        
   n_minibatch: 32
   n_epochs: 10         
   gamma: 0.99          
@@ -34,6 +35,7 @@ experiment:
   policy_kwargs: 
     log_std_init: 0.0
     net_arch: [64, 64]
+    ortho_init: true
   verbose: 0
   seed: 2026
   device: cpu

@@ -21,20 +21,25 @@ def main(cfg: DictConfig):
 
     # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
     # batch_size is always based on the on-policy data size (n_steps * n_envs * window_size).
-    batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
+    if "batch_size" in exp and exp.batch_size is not None:
+        batch_size = exp.batch_size
+        n_minibatch_effective = (exp.n_steps * exp.n_envs * exp.window_size) // batch_size
+    else:
+        batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
+        n_minibatch_effective = exp.n_minibatch
 
     # logger
     if exp.window_size > 1:
         if not exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         elif exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+            base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         elif exp.sequential_window_training and exp.fresh_adv:
-            base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+            base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         else:
-            base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+            base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={exp.n_minibatch} batch_size={batch_size}"
+        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
@@ -47,7 +52,7 @@ def main(cfg: DictConfig):
 
     # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    env = VecNormalize(env, norm_reward=True, norm_obs=True)
+    env = VecNormalize(env, norm_reward=False, norm_obs=True)
 
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
