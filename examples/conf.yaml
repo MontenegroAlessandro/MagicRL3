@@ -5,7 +5,7 @@ wandb:
 experiment:
   # ENV
   env_name: HalfCheetah-v5
-  n_envs: 1 # 4             
+  n_envs: 1              
   total_timesteps: 1e6 
   dir_name: results
   render: false
@@ -15,7 +15,7 @@ experiment:
   # PPO Parameters
   policy_type: MlpPolicy
   learning_rate: 3e-4  
-  n_steps: 2048 # 256  
+  n_steps: 2048 
   batch_size: null        
   n_minibatch: 32
   n_epochs: 10         
@@ -43,10 +43,11 @@ experiment:
   device: cpu
   eval_freq: 10000
   n_eval_episodes: 10
+  on_policy_masking: false
 
   # Reusing Trajectories
   window_size: 1 
   on_policy_critic: true
-  weight_type: naive # "naive" or "bh"
-  sequential_window_training: false # true
-  fresh_adv: false # true
+  weight_type: naive 
+  sequential_window_training: false 
+  fresh_adv: false 

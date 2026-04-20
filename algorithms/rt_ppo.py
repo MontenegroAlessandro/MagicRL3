@@ -24,6 +24,7 @@ class RT_PPO(PPO):
             is_weight_type: IS_WEIGHT_TYPE = "naive",
             sequential_window_training: bool = False,
             fresh_adv: bool = False,
+            on_policy_masking: bool = False,
             *args,
             **kwargs,
         ):
@@ -42,6 +43,7 @@ class RT_PPO(PPO):
         self.is_weight_type = is_weight_type
         self.sequential_window_training = sequential_window_training
         self.fresh_adv = fresh_adv
+        self.on_policy_masking = on_policy_masking
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
@@ -157,7 +159,7 @@ class RT_PPO(PPO):
                     # advantage normalization made just on on-policy data
                     if self.normalize_advantage and len(advantages) > 1:
                         on_mask = rollout_data.on_policy_mask.bool()
-                        if on_mask.sum() > 1:
+                        if on_mask.sum() > 1 and self.on_policy_masking:
                             adv_mean = advantages[on_mask].mean()
                             adv_std = advantages[on_mask].std() + 1e-8
                         else:
@@ -203,7 +205,7 @@ class RT_PPO(PPO):
                     # Entropy loss favor exploration
                     if entropy is not None:
                         on_mask = rollout_data.on_policy_mask.bool()
-                        if on_mask.sum() > 0:
+                        if on_mask.sum() > 0 and self.on_policy_masking:
                             entropy_loss = -entropy[on_mask].mean()
                         else:
                             entropy_loss = -entropy.mean()
@@ -229,7 +231,7 @@ class RT_PPO(PPO):
                             # Mixed mode: guard against inflated KL from off-policy samples
                             # by computing KL only over the on-policy portion.
                             on_policy_mask_bool = rollout_data.on_policy_mask.bool()
-                            if on_policy_mask_bool.sum() > 0:
+                            if on_policy_mask_bool.sum() > 0 and self.on_policy_masking:
                                 log_ratio_on = log_ratio[on_policy_mask_bool]
                                 approx_kl_div = th.mean(
                                     (th.exp(log_ratio_on) - 1) - log_ratio_on
