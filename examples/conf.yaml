@@ -41,7 +41,7 @@ experiment:
   verbose: 0
   seed: 2026
   device: cpu
-  eval_freq: 10000
+  eval_freq: 10_000
   n_eval_episodes: 10
   on_policy_masking: false
 

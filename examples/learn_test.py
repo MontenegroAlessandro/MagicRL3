@@ -52,7 +52,14 @@ def main(cfg: DictConfig):
 
     # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma)
+    env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=True)
+
+    # --- Evaluation env ---
+    eval_env = make_vec_env(exp.env_name, n_envs=1, seed=exp.seed + 1000)
+    eval_env = VecNormalize(eval_env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=False)
+    eval_env.obs_rms = env.obs_rms
+    if hasattr(env, "ret_rms"):
+        eval_env.ret_rms = env.ret_rms
 
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
@@ -94,6 +101,7 @@ def main(cfg: DictConfig):
             is_weight_type=exp.weight_type,
             sequential_window_training=exp.sequential_window_training,
             fresh_adv=exp.fresh_adv,
+            on_policy_masking=exp.on_policy_masking,
             # Old PPO args
             policy=exp.policy_type,
             env=env,
@@ -120,6 +128,17 @@ def main(cfg: DictConfig):
             device=exp.device
         )
 
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=f"{exp.dir_name}/models/{run.id}",
+        log_path=f"{exp.dir_name}/logs/{run.id}",
+        eval_freq=cfg.experiment.eval_freq,
+        n_eval_episodes=cfg.experiment.n_eval_episodes,
+        deterministic=True,
+        render=False,
+        verbose=0
+    )
+
     wandb_callback = WandbCallback(
         model_save_path=f"{exp.dir_name}/models/{run.id}",
         verbose=2,
@@ -128,9 +147,11 @@ def main(cfg: DictConfig):
     model.learn(
         total_timesteps=int(exp.total_timesteps),
         progress_bar=True,
-        callback=CallbackList([wandb_callback]),
+        callback=CallbackList([wandb_callback, eval_callback]),
     )
-    model.save(f"{exp.dir_name}/ppo_halfcheetah")
+    env_name = str(exp.env_name).split("-")[0]
+    method_name = "RT-PPO" if exp.window_size > 1 else "PPO"
+    model.save(f"{exp.dir_name}/{env_name}_{method_name}_{run.id}")
 
     # evaluate
     if exp.render:
