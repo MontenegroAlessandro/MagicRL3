@@ -1,5 +1,5 @@
 wandb:
-  project: rt-ppo-ho
+  project: debug-ppo-tuned
   sync_tensorboard: true
   tags: null
 
@@ -31,8 +31,11 @@ experiment:
   rollout_buffer_kwargs: null
   target_kl: null
   stats_window_size: 100
-  tensorboard_log: null
-  policy_kwargs:
+  tensorboard_log: null      
+  policy_kwargs: 
+    log_std_init: -2
+    ortho_init: false
+    activation_fn: nn.ReLU
     net_arch:
       pi: [256, 256]
       vf: [256, 256]

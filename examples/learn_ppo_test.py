@@ -13,6 +13,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
+from utils.config_utils import resolve_policy_kwargs
 
 @hydra.main(version_base=None, config_path="../config/ppo", config_name="")
 def main(cfg: DictConfig):
@@ -24,9 +25,9 @@ def main(cfg: DictConfig):
     n_updates = exp.n_epochs * exp.n_minibatch
 
     # logger
-    ppo_info = f"{exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps} epochs={exp.n_epochs} n_minibatch={exp.n_minibatch} batch_size={batch_size} n_updates={n_updates} kl_target={exp.target_kl}"
+    ppo_info = f"{exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps} epochs={exp.n_epochs} n_minibatch={exp.n_minibatch} batch_size={batch_size} n_updates={n_updates}"
     if exp.window_size > 1:
-        base_name = f"RT-PPO {ppo_info} w={exp.window_size} opc={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl}"
+        base_name = f"RT-PPO {ppo_info} SEQ={exp.sequential_window_training} w={exp.window_size} opc={exp.on_policy_critic} wt={exp.weight_type}"
     else:
         base_name = f"PPO {ppo_info}"
     
@@ -46,14 +47,12 @@ def main(cfg: DictConfig):
 
     # make the env
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    env = VecNormalize(env, norm_reward=True, norm_obs=True)
-    
+    env = VecNormalize(env, norm_reward=False, norm_obs=True)
+
     # parse policy args
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+    policy_kwargs = resolve_policy_kwargs(policy_kwargs)
 
-    # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
-    # batch_size is always based on the on-policy data size (n_steps * n_envs) regardless of window.
-    batch_size = (exp.n_steps * exp.n_envs) // exp.n_minibatch
     if exp.window_size == 1:
         model = PPO(
             policy=exp.policy_type,

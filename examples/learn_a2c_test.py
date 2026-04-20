@@ -14,6 +14,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_a2c import RT_A2C
 from buffers.buffers import MultiRolloutBuffer
+from utils.config_utils import resolve_policy_kwargs
 
 @hydra.main(version_base=None, config_path="../config/a2c/", config_name="")
 def main(cfg: DictConfig):
@@ -46,6 +47,7 @@ def main(cfg: DictConfig):
 
     # parse policy args
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+    policy_kwargs = resolve_policy_kwargs(policy_kwargs)
 
     # learn
     if exp.window_size == 1:
