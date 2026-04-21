@@ -1,5 +1,5 @@
 import gymnasium as gym
-from gymnasium.wrappers import TimeLimit
+from pathlib import Path
 from stable_baselines3 import A2C, PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
@@ -14,52 +14,97 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
 from buffers.buffers import MultiRolloutBuffer
 from utils.config_utils import resolve_policy_kwargs
+from stable_baselines3.common.callbacks import CallbackList, EvalCallback
+from omegaconf import open_dict
+from datetime import datetime
+
+
+def get_full_config(cfg):
+    exp = cfg.experiment
+
+    batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
+    n_updates = exp.n_epochs * exp.n_minibatch
+    n_sample_reuse = exp.n_epochs * exp.window_size
+
+    if exp.window_size == 1:
+        group_name = "PPO"
+    else:
+        weight_suffix = "-BH" if exp.weight_type == "bh" else "-N"
+        seq_suffix = "-SEQ" if exp.sequential_window_training else ""
+        group_name = f"RT-PPO{seq_suffix}{weight_suffix} w={exp.window_size}"
+
+    group_name += (
+        f" {exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps}"
+        f" K={exp.n_epochs}"
+        f" nb={exp.n_minibatch}"
+        f" B={batch_size}"
+        f" nu={n_updates}"
+        f" ns={n_sample_reuse}"
+    )
+
+    with open_dict(cfg):
+        cfg.experiment.batch_size = batch_size
+        cfg.experiment.n_updates = n_updates
+        cfg.experiment.n_sample_reuse = n_sample_reuse
+        cfg.group_name = group_name
+        cfg.run_name = f"{group_name} seed={exp.seed}"
+
+    return cfg
+
 
 @hydra.main(version_base=None, config_path="../config/ppo", config_name="")
 def main(cfg: DictConfig):
+    cfg = get_full_config(cfg)
     exp = cfg.experiment
 
-    # Derive batch_size from n_minibatch so we have direct control over gradient steps per epoch.
-    # batch_size is always based on the on-policy data size (n_steps * n_envs * window_size).
-    batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
-    n_updates = exp.n_epochs * exp.n_minibatch
-
-    # logger
-    ppo_info = f"{exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps} epochs={exp.n_epochs} n_minibatch={exp.n_minibatch} batch_size={batch_size} n_updates={n_updates}"
-    if exp.window_size > 1:
-        base_name = f"RT-PPO {ppo_info} SEQ={exp.sequential_window_training} w={exp.window_size} opc={exp.on_policy_critic} wt={exp.weight_type}"
-    else:
-        base_name = f"PPO {ppo_info}"
-    
-    conf = OmegaConf.to_container(cfg, resolve=True)
-    conf["group"] = base_name
-    conf["n_updates"] = n_updates
-    conf["batch_size"] = batch_size
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_dir = Path(exp.dir_name) / now
+    wandb_dir = output_dir / "wandb"
+    tb_dir = output_dir / "tensorboard"
+    checkpoints_dir = output_dir / "checkpoints"
+    model_dir = output_dir / "model"
+    eval_dir = output_dir / "eval"
 
     run = wandb.init(
         project=cfg.wandb.project,
-        config=conf,
+        config=OmegaConf.to_container(cfg, resolve=True),
         sync_tensorboard=cfg.wandb.sync_tensorboard,
-        group=base_name,                       
-        name=f"{base_name} seed={exp.seed}",  
+        group=cfg.group_name,                       
+        name=cfg.run_name,  
         tags=cfg.wandb.tags, 
+        dir=wandb_dir,
     )
 
     # make the env
-    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
-    env = VecNormalize(env, norm_reward=False, norm_obs=True)
+    train_env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
+    train_env = VecNormalize(
+        train_env, 
+        norm_reward=exp.norm_reward, 
+        norm_obs=exp.norm_obs, 
+        gamma=exp.gamma
+    )
+    
+    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_envs, seed=exp.seed)
+    eval_env = VecNormalize(
+        eval_env, 
+        norm_reward=False, 
+        norm_obs=exp.norm_obs, 
+        gamma=exp.gamma,
+        training = False
+    )
 
     # parse policy args
     policy_kwargs=OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
     policy_kwargs = resolve_policy_kwargs(policy_kwargs)
 
+    # initialize PPO or RT-PPO
     if exp.window_size == 1:
         model = PPO(
             policy=exp.policy_type,
-            env=env,
+            env=train_env,
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
-            batch_size=batch_size,
+            batch_size=exp.batch_size,
             n_epochs=exp.n_epochs,
             gamma=exp.gamma,
             gae_lambda=exp.gae_lambda,
@@ -75,27 +120,27 @@ def main(cfg: DictConfig):
             stats_window_size=exp.stats_window_size,
             policy_kwargs=policy_kwargs,
             verbose=exp.verbose,
-            tensorboard_log=f"{exp.dir_name}/runs/{run.id}",
+            tensorboard_log=tb_dir,
             seed=exp.seed,
             device=exp.device
         )
     else:
         model = RT_PPO(
             on_policy_critic=exp.on_policy_critic,
+            is_weight_type=exp.weight_type,
+            sequential_window_training=exp.sequential_window_training,
+            fresh_adv=exp.fresh_adv,
             rollout_buffer_class=MultiRolloutBuffer,
             rollout_buffer_kwargs=dict(
                 window_size=exp.window_size,
                 use_bh=(exp.weight_type == "bh"),
             ),
-            is_weight_type=exp.weight_type,
-            sequential_window_training=exp.sequential_window_training,
-            fresh_adv=exp.fresh_adv,
             # Old PPO args
             policy=exp.policy_type,
-            env=env,
+            env=train_env,
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
-            batch_size=batch_size,
+            batch_size=exp.batch_size,
             n_epochs=exp.n_epochs,
             gamma=exp.gamma,
             gae_lambda=exp.gae_lambda,
@@ -111,32 +156,37 @@ def main(cfg: DictConfig):
             stats_window_size=exp.stats_window_size,
             policy_kwargs=policy_kwargs,
             verbose=exp.verbose,
-            tensorboard_log=f"{exp.dir_name}/runs/{run.id}",
+            tensorboard_log=tb_dir,
             seed=exp.seed,
             device=exp.device
         )
+
+    eval_callback = EvalCallback(
+        eval_env,
+        log_path=eval_dir,
+        eval_freq=max(exp.eval_freq // exp.n_envs, 1),
+        n_eval_episodes=exp.n_eval_episodes,
+        deterministic=False,
+        render=False,
+    )
+
+    wandb_callback = WandbCallback(
+        model_save_path=checkpoints_dir,
+        model_save_freq=0,
+        verbose=2,
+    )
+
+    callabacks = CallbackList([eval_callback, wandb_callback])
+
     model.learn(
         total_timesteps=int(exp.total_timesteps),
+        callback=callabacks,
         progress_bar=True,
-        callback=WandbCallback(
-            model_save_path=f"{exp.dir_name}/models/{run.id}",
-            verbose=2,
-        ),
+        log_interval=10,
     )
-    model.save(f"{exp.dir_name}/ppo_halfcheetah")
 
-    # evaluate
-    if exp.render:
-        eval_env = gym.make(exp.env_name, render_mode="human")
-        obs, info = eval_env.reset()
-        for i in range(1000):
-            action, _state = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = eval_env.step(action)
-            if terminated or truncated:
-                obs, info = eval_env.reset()
-        eval_env.close()
-    
-    # close the wandb run
+    model.save(model_dir)
+
     wandb.finish()
 
 

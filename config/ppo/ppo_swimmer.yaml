@@ -1,12 +1,12 @@
 wandb:
-  project: null
+  project: rt-ppo-hc-3
   sync_tensorboard: true
   tags: null
 
 experiment:
   # ENV
   env_name: null
-  n_envs: 1 # 4           
+  n_envs: 4 # 4           
   dir_name: null
   norm_reward: false
   norm_obs: true
@@ -16,12 +16,12 @@ experiment:
 
   # PPO Parameters
   policy_type: MlpPolicy
-  learning_rate: 3e-4  
-  n_steps: 2048 # 256         
-  n_minibatch: 32
+  learning_rate: !!float 6e-4 
+  n_steps: 1024 # 256         
+  n_minibatch: 16
   n_epochs: 10         
-  gamma: 0.995          
-  gae_lambda: 0.97    
+  gamma: 0.9999          
+  gae_lambda: 0.98     
   clip_range: 0.2      
   clip_range_vf: null
   normalize_advantage: true 
@@ -49,5 +49,5 @@ experiment:
 
   # Eval parameters
   eval_freq: 10000
-  n_eval_episodes: 1
-  n_eval_envs: 1
+  n_eval_episodes: 10
+  n_eval_envs: 10

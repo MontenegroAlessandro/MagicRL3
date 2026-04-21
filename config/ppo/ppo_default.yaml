@@ -5,12 +5,15 @@ wandb:
 
 experiment:
   # ENV
-  env_name: 
-  n_envs: 1 # 4             
+  env_name: null
+  n_envs: 1 # 4           
+  dir_name: null
+  norm_reward: false
+  norm_obs: true
+    
+  # Training
   total_timesteps: 1e6 
-  dir_name: results
-  render: false
-  
+
   # PPO Parameters
   policy_type: MlpPolicy
   learning_rate: 3e-4  
@@ -43,3 +46,8 @@ experiment:
   weight_type: naive # "naive" or "bh"
   sequential_window_training: false # true
   fresh_adv: false # true
+
+  # Eval parameters
+  eval_freq: 10000
+  n_eval_episodes: 10
+  n_eval_envs: 10
