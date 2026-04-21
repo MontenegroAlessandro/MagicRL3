@@ -31,15 +31,25 @@ def main(cfg: DictConfig):
     # logger
     if exp.window_size > 1:
         if not exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            # base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            weight = "BH" if exp.weight_type == "bh" else "N"
+            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
         elif exp.sequential_window_training and not exp.fresh_adv:
-            base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            # base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            weight = "BH-S" if exp.weight_type == "bh" else "N-S"
+            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
         elif exp.sequential_window_training and exp.fresh_adv:
-            base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            # base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            weight = "BH-F" if exp.weight_type == "bh" else "N-F"
+            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
         else:
-            base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            # base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+            weight = "BH-SF" if exp.weight_type == "bh" else "N-SF"
+            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
     else:
-        base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+        # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
+        base_name = f"PPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
+    base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
@@ -48,6 +58,7 @@ def main(cfg: DictConfig):
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,
         name=f"{base_name} seed={exp.seed}",
+        tags=cfg.wandb.tags,
     )
 
     # --- Training env ---
@@ -63,6 +74,19 @@ def main(cfg: DictConfig):
 
     # parse policy args
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
+    if policy_kwargs is not None and "activation_fn" in policy_kwargs:
+        activation_map = {
+            "relu":    nn.ReLU,
+            "tanh":    nn.Tanh,
+            "elu":     nn.ELU,
+            "leaky_relu": nn.LeakyReLU,
+            "selu":    nn.SELU,
+            "gelu":    nn.GELU,
+        }
+        key = policy_kwargs["activation_fn"].lower()
+        if key not in activation_map:
+            raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(activation_map)}")
+        policy_kwargs["activation_fn"] = activation_map[key]
 
     if exp.window_size == 1:
         model = PPO(
