@@ -49,7 +49,7 @@ def main(cfg: DictConfig):
     else:
         # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         base_name = f"PPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
-    base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma}"
+    base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} opc={exp.on_policy_critic}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
