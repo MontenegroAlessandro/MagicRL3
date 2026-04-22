@@ -44,7 +44,7 @@ experiment:
   seed: 2026
   device: cpu
   eval_freq: 10_000
-  n_eval_episodes: 10
+  n_eval_episodes: 50
   on_policy_masking: false
 
   # Reusing Trajectories
