@@ -66,6 +66,7 @@ def main(cfg: DictConfig):
     eval_dir = output_dir / "eval"
 
     run = wandb.init(
+        entity=cfg.wandb.entity,
         project=cfg.wandb.project,
         config=OmegaConf.to_container(cfg, resolve=True),
         sync_tensorboard=cfg.wandb.sync_tensorboard,
@@ -166,7 +167,7 @@ def main(cfg: DictConfig):
         log_path=eval_dir,
         eval_freq=max(exp.eval_freq // exp.n_envs, 1),
         n_eval_episodes=exp.n_eval_episodes,
-        deterministic=False,
+        deterministic=True,
         render=False,
     )
 

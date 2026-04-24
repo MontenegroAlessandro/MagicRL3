@@ -126,10 +126,6 @@ class RT_PPO(PPO):
         else:
             window_ids = [None]
 
-        early_stop_condition_total_by_window = {wid: 0 for wid in window_ids}
-        early_stop_condition_true_by_window = {wid: 0 for wid in window_ids}
-        approx_kl_divs_by_window = {wid: [] for wid in window_ids}
-
         # update advantages
         if self.fresh_adv:
             _gen = self.rollout_buffer.get(self.batch_size)  # just triggers generator_ready
@@ -140,7 +136,7 @@ class RT_PPO(PPO):
 
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            kl_triggered_windows = set()  # tracks which window_ids hit the KL threshold this epoch
+            approx_kl_divs = []
 
             for wid in window_ids:
                 # Do a complete pass on the rollout buffer (optionally filtered by window)
@@ -213,52 +209,20 @@ class RT_PPO(PPO):
 
                     loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
 
-                    # Calculate approximate form of reverse KL Divergence for early stopping.
+                    # Calculate approximate form of reverse KL Divergence for early stopping
                     # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
+                    # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
                     # and Schulman blog: http://joschu.net/blog/kl-approx.html
-                    # NOTE: it is the Schulman's approximation, it incorporates a bit of variance
-                    # reduction by exploiting the second-order taylor expansion of the KL.
                     with th.no_grad():
                         log_ratio = log_prob - rollout_data.old_log_prob
-                        if self.sequential_window_training:
-                            # All samples in the mini-batch belong to window `wid`, so we
-                            # compute KL over all of them regardless of on_policy_mask.
-                            approx_kl_div = th.mean(
-                                (th.exp(log_ratio) - 1) - log_ratio
-                            ).cpu().numpy()
-                        else:
-                            # Mixed mode: guard against inflated KL from off-policy samples
-                            # by computing KL only over the on-policy portion.
-                            on_policy_mask_bool = rollout_data.on_policy_mask.bool()
-                            if on_policy_mask_bool.sum() > 0:
-                                log_ratio_on = log_ratio[on_policy_mask_bool]
-                                approx_kl_div = th.mean(
-                                    (th.exp(log_ratio_on) - 1) - log_ratio_on
-                                ).cpu().numpy()
-                            else:
-                                # No on-policy samples in this minibatch — skip early stopping
-                                approx_kl_div = 0.0
-                        approx_kl_divs_by_window[wid].append(float(approx_kl_div))
+                        approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                        approx_kl_divs.append(approx_kl_div)
 
                     if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                        early_stop_condition_total_by_window[wid] += 1
-                        early_stop_condition_true_by_window[wid] += 1
+                        continue_training = False
                         if self.verbose >= 1:
-                            if self.sequential_window_training:
-                                print(
-                                    f"Early stopping at epoch {epoch}, window {wid} "
-                                    f"due to reaching max kl: {approx_kl_div:.2f}"
-                                )
-                            else:
-                                print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
-                        if self.sequential_window_training:
-                            # Record the violation and move on to the next (older) window.
-                            kl_triggered_windows.add(wid)
-                        else:
-                            continue_training = False
+                            print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
                         break
-                    elif self.target_kl is not None:
-                        early_stop_condition_total_by_window[wid] += 1
 
                     # Optimization step
                     self.policy.optimizer.zero_grad()
@@ -266,10 +230,6 @@ class RT_PPO(PPO):
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()
-
-            # In sequential mode, only stop training if every window hit the KL threshold.
-            if self.sequential_window_training and kl_triggered_windows == set(window_ids):
-                continue_training = False
 
             self._n_updates += 1
             if not continue_training:
@@ -281,31 +241,49 @@ class RT_PPO(PPO):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
-        self.logger.record("train/n_updates", self._n_updates)
+        if hasattr(self.policy, "log_std"):
+            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/clip_range", clip_range)
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
         
         # Debug logs for RT
-        for wid in window_ids:
-            approx_kl_values = approx_kl_divs_by_window[wid]
-            approx_kl_metric_suffix = f"window_{wid}" if wid is not None else "window_all"
-            approx_kl_mean = float(np.mean(approx_kl_values)) if len(approx_kl_values) > 0 else 0.0
-            self.logger.record(f"debug/approx_kl_{approx_kl_metric_suffix}_mean", approx_kl_mean)
-            self.logger.record(f"debug/approx_kl_{approx_kl_metric_suffix}_count", len(approx_kl_values))
+        
+        if self.is_weight_type == "bh":
+            for rollout_bh in self.rollout_buffer.get(batch_size=None, window_id=None):
+                actions = rollout_bh.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    # Convert discrete action from float to long
+                    actions = rollout_bh.actions.long().flatten()
 
-            denominator = early_stop_condition_total_by_window[wid]
-            early_stop_true_pct = (
-                100.0 * early_stop_condition_true_by_window[wid] / denominator if denominator > 0 else 0.0
-            )
-            metric_name = (
-                f"debug/early_stopping_condition_true_pct_window_{wid}"
-                if wid is not None
-                else "debug/early_stopping_condition_true_pct_window_all"
-            )
-            self.logger.record(metric_name, early_stop_true_pct)
-        if hasattr(self.policy, "log_std"):
-            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+                values, log_prob, entropy = self.policy.evaluate_actions(rollout_bh.observations, actions)
+                
+                with th.no_grad():
+                    ratio = self._compute_ratio(log_prob, rollout_bh)
+                    log_ratio = th.log(ratio)
+                    approx_kl_bh = th.mean((ratio - 1) - log_ratio).item()
+
+            self.logger.record("debug/approx_kl_bh", approx_kl_bh)
+        else:
+            n_windows = 1 + len(self.rollout_buffer.history)
+            for wid in list(range(n_windows)):
+                for rollout_w in self.rollout_buffer.get(batch_size=None, window_id=wid):
+                    actions = rollout_w.actions
+                    if isinstance(self.action_space, spaces.Discrete):
+                        # Convert discrete action from float to long
+                        actions = rollout_w.actions.long().flatten()
+
+                    values, log_prob, entropy = self.policy.evaluate_actions(rollout_w.observations, actions)
+                    
+                    with th.no_grad():
+                        ratio = self._compute_ratio(log_prob, rollout_w)
+                        log_ratio = th.log(ratio)
+                        approx_kl_w = th.mean((ratio - 1) - log_ratio).item()
+                
+                self.logger.record(f"debug/approx_kl_w={wid}", approx_kl_w)

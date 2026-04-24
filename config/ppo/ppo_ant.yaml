@@ -1,6 +1,5 @@
 wandb:
-  entity: null
-  project: null
+  project: rt-ppo-hc-3
   sync_tensorboard: true
   tags: null
 
@@ -17,18 +16,18 @@ experiment:
 
   # PPO Parameters
   policy_type: MlpPolicy
-  learning_rate: 3e-4  
-  n_steps: 2048 # 256         
-  n_minibatch: 32
+  learning_rate: 1.90609e-05
+  n_steps: 512 # 256         
+  n_minibatch: 16
   n_epochs: 10         
-  gamma: 0.995          
-  gae_lambda: 0.97    
-  clip_range: 0.2      
+  gamma: 0.98          
+  gae_lambda: 0.8     
+  clip_range: 0.1 
   clip_range_vf: null
   normalize_advantage: true 
-  ent_coef: 0.0            
-  vf_coef: 0.5             
-  max_grad_norm: 0.5       
+  ent_coef: 4.9646e-07          
+  vf_coef: 0.677239             
+  max_grad_norm: 0.6       
   use_sde: false
   sde_sample_freq: -1
   rollout_buffer_class: null
@@ -49,17 +48,7 @@ experiment:
   fresh_adv: false # true
 
   # Eval parameters
-  eval_freq: 10_000
+  eval_freq: 10000
   n_eval_episodes: 50
   n_eval_envs: 1
-
-
-hydra:
-  run:
-    dir: .
-  sweep:
-    dir: .
-    subdir: .
-  output_subdir: null
-  job:
-    chdir: false
+  
