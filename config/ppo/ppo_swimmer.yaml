@@ -10,7 +10,7 @@ experiment:
   dir_name: null
   norm_reward: false
   norm_obs: true
-    
+
   # Training
   total_timesteps: 1e6 
 

@@ -1,44 +1,45 @@
+# PPO parameters for hopper
+# derived from geppo (ppo default with tuned gamma and gae_lambda)
+
 wandb:
-  project: debug-ppo-tuned
+  entity: null
+  project: null
   sync_tensorboard: true
   tags: null
 
 experiment:
   # ENV
-  env_name: Hopper-v4
-  n_envs: 1 # 4             
+  env_name: null
+  n_envs: 1 # 4           
+  dir_name: null
+  norm_reward: false
+  norm_obs: true
+    
+  # Training
   total_timesteps: 1e6 
-  dir_name: results
-  render: false
-  
+
   # PPO Parameters
   policy_type: MlpPolicy
-  learning_rate: 9.80828e-05 
-  n_steps: 512 # 256         
-  n_minibatch: 16
-  n_epochs: 5         
-  gamma: 0.999          
-  gae_lambda: 0.99     
+  learning_rate: 3e-4  
+  n_steps: 2048 # 256         
+  n_minibatch: 32
+  n_epochs: 10         
+  gamma: 0.995          
+  gae_lambda: 0.97    
   clip_range: 0.2      
   clip_range_vf: null
   normalize_advantage: true 
-  ent_coef: 0.00229519         
-  vf_coef: 0.835671            
-  max_grad_norm: 0.7       
+  ent_coef: 0.0            
+  vf_coef: 0.5             
+  max_grad_norm: 0.5       
   use_sde: false
   sde_sample_freq: -1
   rollout_buffer_class: null
   rollout_buffer_kwargs: null
   target_kl: null
   stats_window_size: 100
-  tensorboard_log: null      
+  tensorboard_log: null
   policy_kwargs: 
-    log_std_init: -2
-    ortho_init: false
-    activation_fn: nn.ReLU
-    net_arch:
-      pi: [256, 256]
-      vf: [256, 256]
   verbose: 0
   seed: 2026
   device: cpu
@@ -49,3 +50,19 @@ experiment:
   weight_type: naive # "naive" or "bh"
   sequential_window_training: false # true
   fresh_adv: false # true
+
+  # Eval parameters
+  eval_freq: 10_000
+  n_eval_episodes: 50
+  n_eval_envs: 1
+
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+    subdir: .
+  output_subdir: null
+  job:
+    chdir: false

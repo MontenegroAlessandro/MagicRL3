@@ -35,10 +35,8 @@ class RT_PPO(PPO):
             window's mini-batch loop but the training continues with the next window.
             If False (default), all windows are mixed together as before.
         """
-        # initialize PPO standard parameters
         super().__init__(*args, **kwargs)
 
-        # new parameters
         self.on_policy_critic = on_policy_critic
         self.is_weight_type = is_weight_type
         self.sequential_window_training = sequential_window_training
@@ -53,14 +51,7 @@ class RT_PPO(PPO):
           3. Evaluate the current policy on all historical rollouts → append a new column.
           4. Save the current policy state_dict to _policy_history (of the buffer).
         """
-        # Standard SB3 rollout collection
         result = super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps)
-
-        rollout_trajectories = env.num_envs + int(rollout_buffer.episode_starts[1:].sum())
-        completed_trajectories = int(rollout_buffer.episode_starts[1:].sum()) + int(self._last_episode_starts.sum())
-        self.logger.record("debug/rollout_trajectories", rollout_trajectories)
-        self.logger.record("debug/completed_trajectories", completed_trajectories)
-
 
         if self.rollout_buffer.window_length > 1 and self.is_weight_type == "bh":
             self.rollout_buffer.set_current_policy(self.policy)
@@ -73,12 +64,16 @@ class RT_PPO(PPO):
         log_prob: th.Tensor,
         rollout_data,
     ) -> th.Tensor:
-
+        """Returns the IS weight π_new / π_behavior.
+        naive: standard on-policy ratio (π_new / π_old).
+        bh: π_new divided by the geometric mean of all historical policies in the window,
+            so that off-policy samples are re-weighted relative to the mixture behavior policy.
+        """
         if self.is_weight_type == "naive" or self.rollout_buffer.window_length == 1:
             return th.exp(log_prob - rollout_data.old_log_prob)
 
         all_log_probs = rollout_data.all_log_probs  # (batch, w)
-        
+
         # mask valid entries (-inf = invalid)
         valid_mask = th.isfinite(all_log_probs)  # (batch, w)
 
@@ -127,10 +122,6 @@ class RT_PPO(PPO):
         else:
             window_ids = [None]
 
-        early_stop_condition_total_by_window = {wid: 0 for wid in window_ids}
-        early_stop_condition_true_by_window = {wid: 0 for wid in window_ids}
-        approx_kl_divs_by_window = {wid: [] for wid in window_ids}
-
         # update advantages
         if self.fresh_adv:
             _gen = self.rollout_buffer.get(self.batch_size)  # just triggers generator_ready
@@ -139,26 +130,29 @@ class RT_PPO(PPO):
             if self.rollout_buffer.window_length > 1:
                 self.rollout_buffer.recompute_advantages(self.policy)
 
+        # --- initial diagnostics (before training) ---
         initial_clip_fractions_by_window: dict[int, list[float]] = {}
+        initial_kl_by_window: dict[int, list[float]] = {}
+        initial_abs_ratio_by_window: dict[int, list[float]] = {}
         with th.no_grad():
             for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
                 actions = rollout_data.actions
                 if isinstance(self.action_space, spaces.Discrete):
                     actions = actions.long().flatten()
                 _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-                ratio = self._compute_ratio(log_prob, rollout_data)
-                clipped = (th.abs(ratio - 1) > clip_range).float()
+                # clip fraction uses the actual training ratio (BH or naive) to mirror what gets clipped in the loss;
+                # KL and abs(1-ratio) use the naive ratio to measure raw policy shift regardless of IS scheme.
+                initial_ratio = self._compute_ratio(log_prob, rollout_data)
+                naive_ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                clipped = (th.abs(initial_ratio - 1) > clip_range).float()
                 wids_in_batch = rollout_data.window_id
                 for w in wids_in_batch.unique():
                     w_int = int(w.item())
                     w_mask = wids_in_batch == w
+                    w_naive = naive_ratio[w_mask]
                     initial_clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
-
-        for wid, fracs in sorted(initial_clip_fractions_by_window.items()):
-            self.logger.record(f"diagnostics/initial_clip_fraction_window_{wid}", np.mean(fracs))
-        if initial_clip_fractions_by_window:
-            all_initial_fracs = [f for fracs in initial_clip_fractions_by_window.values() for f in fracs]
-            self.logger.record("diagnostics/initial_clip_fraction_mean", np.mean(all_initial_fracs))
+                    initial_kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())  # Schulman approx. reverse KL
+                    initial_abs_ratio_by_window.setdefault(w_int, []).append((w_naive - 1).abs().mean().item())
 
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
@@ -195,12 +189,8 @@ class RT_PPO(PPO):
                     policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
                     policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
-                    # Logging
                     pg_losses.append(policy_loss.item())
-                    clipped = (th.abs(ratio - 1) > clip_range).float()
-                    # clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                    clip_fraction = clipped.mean().item()
-                    clip_fractions.append(clip_fraction)
+                    clip_fractions.append((th.abs(ratio - 1) > clip_range).float().mean().item())
 
                     if self.clip_range_vf is None:
                         # No clipping
@@ -262,11 +252,8 @@ class RT_PPO(PPO):
                             else:
                                 # No on-policy samples in this minibatch — skip early stopping
                                 approx_kl_div = 0.0
-                        approx_kl_divs_by_window[wid].append(float(approx_kl_div))
 
                     if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                        early_stop_condition_total_by_window[wid] += 1
-                        early_stop_condition_true_by_window[wid] += 1
                         if self.verbose >= 1:
                             if self.sequential_window_training:
                                 print(
@@ -281,8 +268,6 @@ class RT_PPO(PPO):
                         else:
                             continue_training = False
                         break
-                    elif self.target_kl is not None:
-                        early_stop_condition_total_by_window[wid] += 1
 
                     # Optimization step
                     self.policy.optimizer.zero_grad()
@@ -301,50 +286,38 @@ class RT_PPO(PPO):
 
         explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
 
-        # Logs
+        # Default PPO logs
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
-        for wid in window_ids:
-            approx_kl_values = approx_kl_divs_by_window[wid]
-            approx_kl_metric_suffix = f"window_{wid}" if wid is not None else "window_all"
-            approx_kl_mean = float(np.mean(approx_kl_values)) if len(approx_kl_values) > 0 else 0.0
-            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_mean", approx_kl_mean)
-            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_count", len(approx_kl_values))
-
-            denominator = early_stop_condition_total_by_window[wid]
-            early_stop_true_pct = (
-                100.0 * early_stop_condition_true_by_window[wid] / denominator if denominator > 0 else 0.0
-            )
-            metric_name = (
-                f"debug/early_stopping_condition_true_pct_window_{wid}"
-                if wid is not None
-                else "debug/early_stopping_condition_true_pct_window_all"
-            )
-            self.logger.record(metric_name, early_stop_true_pct)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
-
         self.logger.record("train/n_updates", self._n_updates)
         self.logger.record("train/clip_range", clip_range)
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
-        
-        # Diagnostic logs — single pass with the final policy over all data
+
+        # Initial diagnostics
+        for wid in sorted(initial_clip_fractions_by_window.keys()):
+            self.logger.record(f"diagnostics_clip/initial_clip_fraction_window_{wid}", np.mean(initial_clip_fractions_by_window[wid]))
+        if initial_clip_fractions_by_window:
+            self.logger.record("diagnostics_clip/initial_clip_fraction_mean", np.mean([f for fracs in initial_clip_fractions_by_window.values() for f in fracs]))
+        for wid in sorted(initial_kl_by_window.keys()):
+            self.logger.record(f"diagnostics_kl/initial_kl_window_{wid}", np.mean(initial_kl_by_window[wid]))
+        if initial_kl_by_window:
+            self.logger.record("diagnostics_kl/initial_kl_mean", np.mean([v for vals in initial_kl_by_window.values() for v in vals]))
+        for wid in sorted(initial_abs_ratio_by_window.keys()):
+            self.logger.record(f"diagnostics_abs_ratio/initial_window_{wid}", np.mean(initial_abs_ratio_by_window[wid]))
+        if initial_abs_ratio_by_window:
+            self.logger.record("diagnostics_abs_ratio/initial_mean", np.mean([v for vals in initial_abs_ratio_by_window.values() for v in vals]))
+
+        # Final diagnostics (single pass with the updated policy)
         clip_fractions_by_window: dict[int, list[float]] = {}
-        naive_is_max_by_window: dict[int, list[float]] = {}
-        naive_is_mean_by_window: dict[int, list[float]] = {}
-        bh_is_max_by_window: dict[int, list[float]] = {}
-        bh_is_mean_by_window: dict[int, list[float]] = {}
-        naive_ess_sum_w:  dict[int, float] = {}
-        naive_ess_sum_w2: dict[int, float] = {}
-        bh_ess_sum_w:     dict[int, float] = {}
-        bh_ess_sum_w2:    dict[int, float] = {}
-        naive_kl_by_window: dict[int, list[float]] = {}
-        bh_kl_by_window:    dict[int, list[float]] = {}
+        kl_by_window: dict[int, list[float]] = {}
+        abs_ratio_by_window: dict[int, list[float]] = {}
         with th.no_grad():
             for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
                 actions = rollout_data.actions
@@ -353,74 +326,24 @@ class RT_PPO(PPO):
                 _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
                 naive_ratio = th.exp(log_prob - rollout_data.old_log_prob)
                 clipped = (th.abs(naive_ratio - 1) > clip_range).float()
-                if rollout_data.all_log_probs is not None:
-                    alp = rollout_data.all_log_probs
-                    valid_mask = th.isfinite(alp)
-                    valid_counts = th.clamp(valid_mask.sum(dim=1), min=1)
-                    log_mean = th.logsumexp(alp, dim=1) - th.log(valid_counts.float())
-                    bh_ratio = th.exp(log_prob - log_mean)
-                else:
-                    bh_ratio = None
                 wids_in_batch = rollout_data.window_id
                 for w in wids_in_batch.unique():
                     w_int = int(w.item())
-                    w_mask = (wids_in_batch == w)
-                    clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
+                    w_mask = wids_in_batch == w
                     w_naive = naive_ratio[w_mask]
-                    naive_is_max_by_window.setdefault(w_int, []).append(w_naive.max().item())
-                    naive_is_mean_by_window.setdefault(w_int, []).append(w_naive.mean().item())
-                    naive_ess_sum_w[w_int]  = naive_ess_sum_w.get(w_int, 0.0)  + w_naive.sum().item()
-                    naive_ess_sum_w2[w_int] = naive_ess_sum_w2.get(w_int, 0.0) + (w_naive ** 2).sum().item()
-                    naive_kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())
-                    if bh_ratio is not None:
-                        w_bh = bh_ratio[w_mask]
-                        bh_is_max_by_window.setdefault(w_int, []).append(w_bh.max().item())
-                        bh_is_mean_by_window.setdefault(w_int, []).append(w_bh.mean().item())
-                        bh_ess_sum_w[w_int]  = bh_ess_sum_w.get(w_int, 0.0)  + w_bh.sum().item()
-                        bh_ess_sum_w2[w_int] = bh_ess_sum_w2.get(w_int, 0.0) + (w_bh ** 2).sum().item()
-                        bh_kl_by_window.setdefault(w_int, []).append(((w_bh - 1) - th.log(w_bh)).mean().item())
-        # clip fractions
-        for wid, fracs in sorted(clip_fractions_by_window.items()):
-            self.logger.record(f"diagnostics/clip_fraction_window_{wid}", np.mean(fracs))
+                    clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
+                    kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())  # Schulman approx. reverse KL
+                    abs_ratio_by_window.setdefault(w_int, []).append((w_naive - 1).abs().mean().item())
+
+        for wid in sorted(clip_fractions_by_window.keys()):
+            self.logger.record(f"diagnostics_clip/clip_fraction_window_{wid}", np.mean(clip_fractions_by_window[wid]))
         if clip_fractions_by_window:
-            all_fracs = [f for fracs in clip_fractions_by_window.values() for f in fracs]
-            self.logger.record("diagnostics/clip_fraction_mean", np.mean(all_fracs))
-        # weight logging (max and mean) - the naive one is always computed
-        for wid in sorted(naive_is_max_by_window.keys()):
-            self.logger.record(f"diagnostics/naive_is_weight_max_window_{wid}", max(naive_is_max_by_window[wid]))
-            self.logger.record(f"diagnostics/naive_is_weight_mean_window_{wid}", np.mean(naive_is_mean_by_window[wid]))
-        if naive_is_max_by_window:
-            self.logger.record("diagnostics/naive_is_weight_max", max(v for vals in naive_is_max_by_window.values() for v in vals))
-            self.logger.record("diagnostics/naive_is_weight_mean", np.mean([v for vals in naive_is_mean_by_window.values() for v in vals]))
-        for wid in sorted(bh_is_max_by_window.keys()):
-            self.logger.record(f"diagnostics/bh_is_weight_max_window_{wid}", max(bh_is_max_by_window[wid]))
-            self.logger.record(f"diagnostics/bh_is_weight_mean_window_{wid}", np.mean(bh_is_mean_by_window[wid]))
-        if bh_is_max_by_window:
-            self.logger.record("diagnostics/bh_is_weight_max", max(v for vals in bh_is_max_by_window.values() for v in vals))
-            self.logger.record("diagnostics/bh_is_weight_mean", np.mean([v for vals in bh_is_mean_by_window.values() for v in vals]))
-        # ESS
-        for wid in sorted(naive_ess_sum_w.keys()):
-            sw, sw2 = naive_ess_sum_w[wid], naive_ess_sum_w2[wid]
-            self.logger.record(f"diagnostics/naive_ess_window_{wid}", sw ** 2 / sw2 if sw2 > 0 else 0.0)
-        if naive_ess_sum_w:
-            sw_tot  = sum(naive_ess_sum_w.values())
-            sw2_tot = sum(naive_ess_sum_w2.values())
-            self.logger.record("diagnostics/naive_ess", sw_tot ** 2 / sw2_tot if sw2_tot > 0 else 0.0)
-        for wid in sorted(bh_ess_sum_w.keys()):
-            sw, sw2 = bh_ess_sum_w[wid], bh_ess_sum_w2[wid]
-            self.logger.record(f"diagnostics/bh_ess_window_{wid}", sw ** 2 / sw2 if sw2 > 0 else 0.0)
-        if bh_ess_sum_w:
-            sw_tot  = sum(bh_ess_sum_w.values())
-            sw2_tot = sum(bh_ess_sum_w2.values())
-            self.logger.record("diagnostics/bh_ess", sw_tot ** 2 / sw2_tot if sw2_tot > 0 else 0.0)
-        # KL
-        for wid in sorted(naive_kl_by_window.keys()):
-            self.logger.record(f"diagnostics/naive_kl_window_{wid}", np.mean(naive_kl_by_window[wid]))
-        if naive_kl_by_window:
-            all_kl = [v for vals in naive_kl_by_window.values() for v in vals]
-            self.logger.record("diagnostics/naive_kl", np.mean(all_kl))
-        for wid in sorted(bh_kl_by_window.keys()):
-            self.logger.record(f"diagnostics/bh_kl_window_{wid}", np.mean(bh_kl_by_window[wid]))
-        if bh_kl_by_window:
-            all_kl = [v for vals in bh_kl_by_window.values() for v in vals]
-            self.logger.record("diagnostics/bh_kl", np.mean(all_kl))
+            self.logger.record("diagnostics_clip/clip_fraction_mean", np.mean([f for fracs in clip_fractions_by_window.values() for f in fracs]))
+        for wid in sorted(kl_by_window.keys()):
+            self.logger.record(f"diagnostics_kl/kl_window_{wid}", np.mean(kl_by_window[wid]))
+        if kl_by_window:
+            self.logger.record("diagnostics_kl/kl_mean", np.mean([v for vals in kl_by_window.values() for v in vals]))
+        for wid in sorted(abs_ratio_by_window.keys()):
+            self.logger.record(f"diagnostics_abs_ratio/final_window_{wid}", np.mean(abs_ratio_by_window[wid]))
+        if abs_ratio_by_window:
+            self.logger.record("diagnostics_abs_ratio/final_mean", np.mean([v for vals in abs_ratio_by_window.values() for v in vals]))

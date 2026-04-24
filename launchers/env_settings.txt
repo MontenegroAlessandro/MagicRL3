@@ -1,0 +1,35 @@
+========= hopper ==========
+WANDB_PROJECT="daje-rt-ppo-hopper"
+ENV_NAME="Hopper-v5"
+CONFIG_NAME="ppo_hopper"
+N_EPOCHS=10
+N_MINIBATCH=32
+N_STEPS=2048
+CPU_SET=""
+NORM_REW="False"
+TOT_TIMESTEPS="1000000"
+
+
+========= swimmer ==========
+WANDB_PROJECT="daje-rt-ppo-swimmer"
+ENV_NAME="Swimmer-v5"
+CONFIG_NAME="ppo_swimmer"
+N_EPOCHS=10
+N_MINIBATCH=16
+N_STEPS=512
+CPU_SET=""
+NORM_REW="False"
+TOT_TIMESTEPS="3000000"
+
+
+========= ant ==========
+WANDB_PROJECT="daje-rt-ppo-ant"
+ENV_NAME="Ant-v5"
+CONFIG_NAME="ppo_ant"
+N_EPOCHS=10
+N_MINIBATCH=16
+N_STEPS=512
+CPU_SET=""
+NORM_REW="True"
+TOT_TIMESTEPS="3000000"
+
