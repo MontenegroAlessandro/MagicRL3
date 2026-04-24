@@ -12,6 +12,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_ppo import RT_PPO
+from algorithms.myppo import MyPPO
 from buffers.buffers import MultiRolloutBuffer
 from utils.config_utils import resolve_policy_kwargs
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback
@@ -100,7 +101,7 @@ def main(cfg: DictConfig):
 
     # initialize PPO or RT-PPO
     if exp.window_size == 1:
-        model = PPO(
+        model = MyPPO(
             policy=exp.policy_type,
             env=train_env,
             learning_rate=exp.learning_rate,
