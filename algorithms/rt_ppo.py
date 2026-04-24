@@ -116,17 +116,6 @@ class RT_PPO(PPO):
         entropy_losses = []
         pg_losses, value_losses = [], []
         clip_fractions = []
-        clip_fractions_by_window: dict[int, list[float]] = {}
-        naive_is_max_by_window: dict[int, list[float]] = {}
-        naive_is_mean_by_window: dict[int, list[float]] = {}
-        bh_is_max_by_window: dict[int, list[float]] = {}
-        bh_is_mean_by_window: dict[int, list[float]] = {}
-        naive_ess_sum_w:  dict[int, float] = {}
-        naive_ess_sum_w2: dict[int, float] = {}
-        bh_ess_sum_w:     dict[int, float] = {}
-        bh_ess_sum_w2:    dict[int, float] = {}
-        naive_kl_by_window: dict[int, list[float]] = {}
-        bh_kl_by_window:    dict[int, list[float]] = {}
 
         continue_training = True
 
@@ -191,43 +180,6 @@ class RT_PPO(PPO):
                     # clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
                     clip_fraction = clipped.mean().item()
                     clip_fractions.append(clip_fraction)
-                    # Per-window clip fraction accumulation
-                    wids_in_batch = rollout_data.window_id  # (batch,) float tensor
-                    for w in wids_in_batch.unique():
-                        w_int = int(w.item())
-                        w_mask = (wids_in_batch == w)
-                        w_clip = clipped[w_mask].mean().item()
-                        clip_fractions_by_window.setdefault(w_int, []).append(w_clip)
-                    with th.no_grad():
-                        # naive weights (will be always available)
-                        naive_ratio = th.exp(log_prob.detach() - rollout_data.old_log_prob)
-                        # BH weights
-                        if rollout_data.all_log_probs is not None:
-                            alp = rollout_data.all_log_probs
-                            valid_mask = th.isfinite(alp)
-                            valid_counts = th.clamp(valid_mask.sum(dim=1), min=1)
-                            log_mean = th.logsumexp(alp, dim=1) - th.log(valid_counts.float())
-                            bh_ratio = th.exp(log_prob.detach() - log_mean)
-                        else:
-                            bh_ratio = None
-                        for w in wids_in_batch.unique():
-                            w_int = int(w.item())
-                            w_mask = (wids_in_batch == w)
-                            w_naive = naive_ratio[w_mask]
-                            naive_is_max_by_window.setdefault(w_int, []).append(w_naive.max().item())
-                            naive_is_mean_by_window.setdefault(w_int, []).append(w_naive.mean().item())
-                            naive_ess_sum_w[w_int]  = naive_ess_sum_w.get(w_int, 0.0)  + w_naive.sum().item()
-                            naive_ess_sum_w2[w_int] = naive_ess_sum_w2.get(w_int, 0.0) + (w_naive ** 2).sum().item()
-                            naive_kl = ((w_naive - 1) - th.log(w_naive)).mean().item()
-                            naive_kl_by_window.setdefault(w_int, []).append(naive_kl)
-                            if bh_ratio is not None:
-                                w_bh = bh_ratio[w_mask]
-                                bh_is_max_by_window.setdefault(w_int, []).append(w_bh.max().item())
-                                bh_is_mean_by_window.setdefault(w_int, []).append(w_bh.mean().item())
-                                bh_ess_sum_w[w_int]  = bh_ess_sum_w.get(w_int, 0.0)  + w_bh.sum().item()
-                                bh_ess_sum_w2[w_int] = bh_ess_sum_w2.get(w_int, 0.0) + (w_bh ** 2).sum().item()
-                                bh_kl = ((w_bh - 1) - th.log(w_bh)).mean().item()
-                                bh_kl_by_window.setdefault(w_int, []).append(bh_kl)
 
                     if self.clip_range_vf is None:
                         # No clipping
@@ -360,7 +312,52 @@ class RT_PPO(PPO):
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
         
-        # Diagnostic logs
+        # Diagnostic logs — single pass with the final policy over all data
+        clip_fractions_by_window: dict[int, list[float]] = {}
+        naive_is_max_by_window: dict[int, list[float]] = {}
+        naive_is_mean_by_window: dict[int, list[float]] = {}
+        bh_is_max_by_window: dict[int, list[float]] = {}
+        bh_is_mean_by_window: dict[int, list[float]] = {}
+        naive_ess_sum_w:  dict[int, float] = {}
+        naive_ess_sum_w2: dict[int, float] = {}
+        bh_ess_sum_w:     dict[int, float] = {}
+        bh_ess_sum_w2:    dict[int, float] = {}
+        naive_kl_by_window: dict[int, list[float]] = {}
+        bh_kl_by_window:    dict[int, list[float]] = {}
+        with th.no_grad():
+            for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
+                actions = rollout_data.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    actions = rollout_data.actions.long().flatten()
+                _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+                naive_ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                clipped = (th.abs(naive_ratio - 1) > clip_range).float()
+                if rollout_data.all_log_probs is not None:
+                    alp = rollout_data.all_log_probs
+                    valid_mask = th.isfinite(alp)
+                    valid_counts = th.clamp(valid_mask.sum(dim=1), min=1)
+                    log_mean = th.logsumexp(alp, dim=1) - th.log(valid_counts.float())
+                    bh_ratio = th.exp(log_prob - log_mean)
+                else:
+                    bh_ratio = None
+                wids_in_batch = rollout_data.window_id
+                for w in wids_in_batch.unique():
+                    w_int = int(w.item())
+                    w_mask = (wids_in_batch == w)
+                    clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
+                    w_naive = naive_ratio[w_mask]
+                    naive_is_max_by_window.setdefault(w_int, []).append(w_naive.max().item())
+                    naive_is_mean_by_window.setdefault(w_int, []).append(w_naive.mean().item())
+                    naive_ess_sum_w[w_int]  = naive_ess_sum_w.get(w_int, 0.0)  + w_naive.sum().item()
+                    naive_ess_sum_w2[w_int] = naive_ess_sum_w2.get(w_int, 0.0) + (w_naive ** 2).sum().item()
+                    naive_kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())
+                    if bh_ratio is not None:
+                        w_bh = bh_ratio[w_mask]
+                        bh_is_max_by_window.setdefault(w_int, []).append(w_bh.max().item())
+                        bh_is_mean_by_window.setdefault(w_int, []).append(w_bh.mean().item())
+                        bh_ess_sum_w[w_int]  = bh_ess_sum_w.get(w_int, 0.0)  + w_bh.sum().item()
+                        bh_ess_sum_w2[w_int] = bh_ess_sum_w2.get(w_int, 0.0) + (w_bh ** 2).sum().item()
+                        bh_kl_by_window.setdefault(w_int, []).append(((w_bh - 1) - th.log(w_bh)).mean().item())
         # clip fractions
         for wid, fracs in sorted(clip_fractions_by_window.items()):
             self.logger.record(f"diagnostics/clip_fraction_window_{wid}", np.mean(fracs))

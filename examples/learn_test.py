@@ -11,7 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from algorithms.rt_ppo import RT_PPO
+from algorithms import RT_PPO, MyPPO
 from buffers.buffers import MultiRolloutBuffer
 import torch.nn as nn
 
@@ -89,7 +89,7 @@ def main(cfg: DictConfig):
         policy_kwargs["activation_fn"] = activation_map[key]
 
     if exp.window_size == 1:
-        model = PPO(
+        model = MyPPO(
             policy=exp.policy_type,
             env=env,
             learning_rate=exp.learning_rate,
