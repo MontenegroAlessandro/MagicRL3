@@ -24,6 +24,7 @@ class RT_PPO(PPO):
             is_weight_type: IS_WEIGHT_TYPE = "naive",
             sequential_window_training: bool = False,
             fresh_adv: bool = False,
+            on_policy_masking: bool = False,
             *args,
             **kwargs,
         ):
@@ -42,7 +43,7 @@ class RT_PPO(PPO):
         self.is_weight_type = is_weight_type
         self.sequential_window_training = sequential_window_training
         self.fresh_adv = fresh_adv
-
+        self.on_policy_masking = on_policy_masking
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
@@ -126,6 +127,10 @@ class RT_PPO(PPO):
         else:
             window_ids = [None]
 
+        early_stop_condition_total_by_window = {wid: 0 for wid in window_ids}
+        early_stop_condition_true_by_window = {wid: 0 for wid in window_ids}
+        approx_kl_divs_by_window = {wid: [] for wid in window_ids}
+
         # update advantages
         if self.fresh_adv:
             _gen = self.rollout_buffer.get(self.batch_size)  # just triggers generator_ready
@@ -134,9 +139,30 @@ class RT_PPO(PPO):
             if self.rollout_buffer.window_length > 1:
                 self.rollout_buffer.recompute_advantages(self.policy)
 
+        initial_clip_fractions_by_window: dict[int, list[float]] = {}
+        with th.no_grad():
+            for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
+                actions = rollout_data.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    actions = actions.long().flatten()
+                _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+                ratio = self._compute_ratio(log_prob, rollout_data)
+                clipped = (th.abs(ratio - 1) > clip_range).float()
+                wids_in_batch = rollout_data.window_id
+                for w in wids_in_batch.unique():
+                    w_int = int(w.item())
+                    w_mask = wids_in_batch == w
+                    initial_clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
+
+        for wid, fracs in sorted(initial_clip_fractions_by_window.items()):
+            self.logger.record(f"diagnostics/initial_clip_fraction_window_{wid}", np.mean(fracs))
+        if initial_clip_fractions_by_window:
+            all_initial_fracs = [f for fracs in initial_clip_fractions_by_window.values() for f in fracs]
+            self.logger.record("diagnostics/initial_clip_fraction_mean", np.mean(all_initial_fracs))
+
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            approx_kl_divs = []
+            kl_triggered_windows = set()  # tracks which window_ids hit the KL threshold this epoch
 
             for wid in window_ids:
                 # Do a complete pass on the rollout buffer (optionally filtered by window)
@@ -154,7 +180,7 @@ class RT_PPO(PPO):
                     # advantage normalization made just on on-policy data
                     if self.normalize_advantage and len(advantages) > 1:
                         on_mask = rollout_data.on_policy_mask.bool()
-                        if on_mask.sum() > 1:
+                        if on_mask.sum() > 1 and self.on_policy_masking:
                             adv_mean = advantages[on_mask].mean()
                             adv_std = advantages[on_mask].std() + 1e-8
                         else:
@@ -171,7 +197,9 @@ class RT_PPO(PPO):
 
                     # Logging
                     pg_losses.append(policy_loss.item())
-                    clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                    clipped = (th.abs(ratio - 1) > clip_range).float()
+                    # clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                    clip_fraction = clipped.mean().item()
                     clip_fractions.append(clip_fraction)
 
                     if self.clip_range_vf is None:
@@ -200,7 +228,7 @@ class RT_PPO(PPO):
                     # Entropy loss favor exploration
                     if entropy is not None:
                         on_mask = rollout_data.on_policy_mask.bool()
-                        if on_mask.sum() > 0:
+                        if on_mask.sum() > 0 and self.on_policy_masking:
                             entropy_loss = -entropy[on_mask].mean()
                         else:
                             entropy_loss = -entropy.mean()
@@ -209,20 +237,52 @@ class RT_PPO(PPO):
 
                     loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
 
-                    # Calculate approximate form of reverse KL Divergence for early stopping
+                    # Calculate approximate form of reverse KL Divergence for early stopping.
                     # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
-                    # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
                     # and Schulman blog: http://joschu.net/blog/kl-approx.html
+                    # NOTE: it is the Schulman's approximation, it incorporates a bit of variance
+                    # reduction by exploiting the second-order taylor expansion of the KL.
                     with th.no_grad():
                         log_ratio = log_prob - rollout_data.old_log_prob
-                        approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                        approx_kl_divs.append(approx_kl_div)
+                        if self.sequential_window_training:
+                            # All samples in the mini-batch belong to window `wid`, so we
+                            # compute KL over all of them regardless of on_policy_mask.
+                            approx_kl_div = th.mean(
+                                (th.exp(log_ratio) - 1) - log_ratio
+                            ).cpu().numpy()
+                        else:
+                            # Mixed mode: guard against inflated KL from off-policy samples
+                            # by computing KL only over the on-policy portion.
+                            on_policy_mask_bool = rollout_data.on_policy_mask.bool()
+                            if on_policy_mask_bool.sum() > 0 and self.on_policy_masking:
+                                log_ratio_on = log_ratio[on_policy_mask_bool]
+                                approx_kl_div = th.mean(
+                                    (th.exp(log_ratio_on) - 1) - log_ratio_on
+                                ).cpu().numpy()
+                            else:
+                                # No on-policy samples in this minibatch — skip early stopping
+                                approx_kl_div = 0.0
+                        approx_kl_divs_by_window[wid].append(float(approx_kl_div))
 
                     if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                        continue_training = False
+                        early_stop_condition_total_by_window[wid] += 1
+                        early_stop_condition_true_by_window[wid] += 1
                         if self.verbose >= 1:
-                            print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                            if self.sequential_window_training:
+                                print(
+                                    f"Early stopping at epoch {epoch}, window {wid} "
+                                    f"due to reaching max kl: {approx_kl_div:.2f}"
+                                )
+                            else:
+                                print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                        if self.sequential_window_training:
+                            # Record the violation and move on to the next (older) window.
+                            kl_triggered_windows.add(wid)
+                        else:
+                            continue_training = False
                         break
+                    elif self.target_kl is not None:
+                        early_stop_condition_total_by_window[wid] += 1
 
                     # Optimization step
                     self.policy.optimizer.zero_grad()
@@ -230,6 +290,10 @@ class RT_PPO(PPO):
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()
+
+            # In sequential mode, only stop training if every window hit the KL threshold.
+            if self.sequential_window_training and kl_triggered_windows == set(window_ids):
+                continue_training = False
 
             self._n_updates += 1
             if not continue_training:
@@ -241,49 +305,122 @@ class RT_PPO(PPO):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
+        for wid in window_ids:
+            approx_kl_values = approx_kl_divs_by_window[wid]
+            approx_kl_metric_suffix = f"window_{wid}" if wid is not None else "window_all"
+            approx_kl_mean = float(np.mean(approx_kl_values)) if len(approx_kl_values) > 0 else 0.0
+            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_mean", approx_kl_mean)
+            self.logger.record(f"train/approx_kl_{approx_kl_metric_suffix}_count", len(approx_kl_values))
+
+            denominator = early_stop_condition_total_by_window[wid]
+            early_stop_true_pct = (
+                100.0 * early_stop_condition_true_by_window[wid] / denominator if denominator > 0 else 0.0
+            )
+            metric_name = (
+                f"debug/early_stopping_condition_true_pct_window_{wid}"
+                if wid is not None
+                else "debug/early_stopping_condition_true_pct_window_all"
+            )
+            self.logger.record(metric_name, early_stop_true_pct)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        self.logger.record("train/n_updates", self._n_updates)
         self.logger.record("train/clip_range", clip_range)
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
         
-        # Debug logs for RT
-        
-        if self.is_weight_type == "bh":
-            for rollout_bh in self.rollout_buffer.get(batch_size=None, window_id=None):
-                actions = rollout_bh.actions
+        # Diagnostic logs — single pass with the final policy over all data
+        clip_fractions_by_window: dict[int, list[float]] = {}
+        naive_is_max_by_window: dict[int, list[float]] = {}
+        naive_is_mean_by_window: dict[int, list[float]] = {}
+        bh_is_max_by_window: dict[int, list[float]] = {}
+        bh_is_mean_by_window: dict[int, list[float]] = {}
+        naive_ess_sum_w:  dict[int, float] = {}
+        naive_ess_sum_w2: dict[int, float] = {}
+        bh_ess_sum_w:     dict[int, float] = {}
+        bh_ess_sum_w2:    dict[int, float] = {}
+        naive_kl_by_window: dict[int, list[float]] = {}
+        bh_kl_by_window:    dict[int, list[float]] = {}
+        with th.no_grad():
+            for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
+                actions = rollout_data.actions
                 if isinstance(self.action_space, spaces.Discrete):
-                    # Convert discrete action from float to long
-                    actions = rollout_bh.actions.long().flatten()
-
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_bh.observations, actions)
-                
-                with th.no_grad():
-                    ratio = self._compute_ratio(log_prob, rollout_bh)
-                    log_ratio = th.log(ratio)
-                    approx_kl_bh = th.mean((ratio - 1) - log_ratio).item()
-
-            self.logger.record("debug/approx_kl_bh", approx_kl_bh)
-        else:
-            n_windows = 1 + len(self.rollout_buffer.history)
-            for wid in list(range(n_windows)):
-                for rollout_w in self.rollout_buffer.get(batch_size=None, window_id=wid):
-                    actions = rollout_w.actions
-                    if isinstance(self.action_space, spaces.Discrete):
-                        # Convert discrete action from float to long
-                        actions = rollout_w.actions.long().flatten()
-
-                    values, log_prob, entropy = self.policy.evaluate_actions(rollout_w.observations, actions)
-                    
-                    with th.no_grad():
-                        ratio = self._compute_ratio(log_prob, rollout_w)
-                        log_ratio = th.log(ratio)
-                        approx_kl_w = th.mean((ratio - 1) - log_ratio).item()
-                
-                self.logger.record(f"debug/approx_kl_w={wid}", approx_kl_w)
+                    actions = rollout_data.actions.long().flatten()
+                _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+                naive_ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                clipped = (th.abs(naive_ratio - 1) > clip_range).float()
+                if rollout_data.all_log_probs is not None:
+                    alp = rollout_data.all_log_probs
+                    valid_mask = th.isfinite(alp)
+                    valid_counts = th.clamp(valid_mask.sum(dim=1), min=1)
+                    log_mean = th.logsumexp(alp, dim=1) - th.log(valid_counts.float())
+                    bh_ratio = th.exp(log_prob - log_mean)
+                else:
+                    bh_ratio = None
+                wids_in_batch = rollout_data.window_id
+                for w in wids_in_batch.unique():
+                    w_int = int(w.item())
+                    w_mask = (wids_in_batch == w)
+                    clip_fractions_by_window.setdefault(w_int, []).append(clipped[w_mask].mean().item())
+                    w_naive = naive_ratio[w_mask]
+                    naive_is_max_by_window.setdefault(w_int, []).append(w_naive.max().item())
+                    naive_is_mean_by_window.setdefault(w_int, []).append(w_naive.mean().item())
+                    naive_ess_sum_w[w_int]  = naive_ess_sum_w.get(w_int, 0.0)  + w_naive.sum().item()
+                    naive_ess_sum_w2[w_int] = naive_ess_sum_w2.get(w_int, 0.0) + (w_naive ** 2).sum().item()
+                    naive_kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())
+                    if bh_ratio is not None:
+                        w_bh = bh_ratio[w_mask]
+                        bh_is_max_by_window.setdefault(w_int, []).append(w_bh.max().item())
+                        bh_is_mean_by_window.setdefault(w_int, []).append(w_bh.mean().item())
+                        bh_ess_sum_w[w_int]  = bh_ess_sum_w.get(w_int, 0.0)  + w_bh.sum().item()
+                        bh_ess_sum_w2[w_int] = bh_ess_sum_w2.get(w_int, 0.0) + (w_bh ** 2).sum().item()
+                        bh_kl_by_window.setdefault(w_int, []).append(((w_bh - 1) - th.log(w_bh)).mean().item())
+        # clip fractions
+        for wid, fracs in sorted(clip_fractions_by_window.items()):
+            self.logger.record(f"diagnostics/clip_fraction_window_{wid}", np.mean(fracs))
+        if clip_fractions_by_window:
+            all_fracs = [f for fracs in clip_fractions_by_window.values() for f in fracs]
+            self.logger.record("diagnostics/clip_fraction_mean", np.mean(all_fracs))
+        # weight logging (max and mean) - the naive one is always computed
+        for wid in sorted(naive_is_max_by_window.keys()):
+            self.logger.record(f"diagnostics/naive_is_weight_max_window_{wid}", max(naive_is_max_by_window[wid]))
+            self.logger.record(f"diagnostics/naive_is_weight_mean_window_{wid}", np.mean(naive_is_mean_by_window[wid]))
+        if naive_is_max_by_window:
+            self.logger.record("diagnostics/naive_is_weight_max", max(v for vals in naive_is_max_by_window.values() for v in vals))
+            self.logger.record("diagnostics/naive_is_weight_mean", np.mean([v for vals in naive_is_mean_by_window.values() for v in vals]))
+        for wid in sorted(bh_is_max_by_window.keys()):
+            self.logger.record(f"diagnostics/bh_is_weight_max_window_{wid}", max(bh_is_max_by_window[wid]))
+            self.logger.record(f"diagnostics/bh_is_weight_mean_window_{wid}", np.mean(bh_is_mean_by_window[wid]))
+        if bh_is_max_by_window:
+            self.logger.record("diagnostics/bh_is_weight_max", max(v for vals in bh_is_max_by_window.values() for v in vals))
+            self.logger.record("diagnostics/bh_is_weight_mean", np.mean([v for vals in bh_is_mean_by_window.values() for v in vals]))
+        # ESS
+        for wid in sorted(naive_ess_sum_w.keys()):
+            sw, sw2 = naive_ess_sum_w[wid], naive_ess_sum_w2[wid]
+            self.logger.record(f"diagnostics/naive_ess_window_{wid}", sw ** 2 / sw2 if sw2 > 0 else 0.0)
+        if naive_ess_sum_w:
+            sw_tot  = sum(naive_ess_sum_w.values())
+            sw2_tot = sum(naive_ess_sum_w2.values())
+            self.logger.record("diagnostics/naive_ess", sw_tot ** 2 / sw2_tot if sw2_tot > 0 else 0.0)
+        for wid in sorted(bh_ess_sum_w.keys()):
+            sw, sw2 = bh_ess_sum_w[wid], bh_ess_sum_w2[wid]
+            self.logger.record(f"diagnostics/bh_ess_window_{wid}", sw ** 2 / sw2 if sw2 > 0 else 0.0)
+        if bh_ess_sum_w:
+            sw_tot  = sum(bh_ess_sum_w.values())
+            sw2_tot = sum(bh_ess_sum_w2.values())
+            self.logger.record("diagnostics/bh_ess", sw_tot ** 2 / sw2_tot if sw2_tot > 0 else 0.0)
+        # KL
+        for wid in sorted(naive_kl_by_window.keys()):
+            self.logger.record(f"diagnostics/naive_kl_window_{wid}", np.mean(naive_kl_by_window[wid]))
+        if naive_kl_by_window:
+            all_kl = [v for vals in naive_kl_by_window.values() for v in vals]
+            self.logger.record("diagnostics/naive_kl", np.mean(all_kl))
+        for wid in sorted(bh_kl_by_window.keys()):
+            self.logger.record(f"diagnostics/bh_kl_window_{wid}", np.mean(bh_kl_by_window[wid]))
+        if bh_kl_by_window:
+            all_kl = [v for vals in bh_kl_by_window.values() for v in vals]
+            self.logger.record("diagnostics/bh_kl", np.mean(all_kl))
