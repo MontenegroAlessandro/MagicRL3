@@ -67,7 +67,7 @@ def main(cfg: DictConfig):
 
     # --- Evaluation env ---
     eval_env = make_vec_env(exp.env_name, n_envs=1, seed=exp.seed + 1000)
-    eval_env = VecNormalize(eval_env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=False)
+    eval_env = VecNormalize(eval_env, norm_reward=False, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=False)
     eval_env.obs_rms = env.obs_rms
     if hasattr(env, "ret_rms"):
         eval_env.ret_rms = env.ret_rms
@@ -121,6 +121,7 @@ def main(cfg: DictConfig):
             rollout_buffer_kwargs=dict(
                 window_size=exp.window_size,
                 use_bh=(exp.weight_type == "bh"),
+                balanced_batches=exp.balanced_batches
             ),
             is_weight_type=exp.weight_type,
             sequential_window_training=exp.sequential_window_training,
