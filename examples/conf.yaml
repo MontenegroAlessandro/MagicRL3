@@ -12,6 +12,7 @@ experiment:
   render: false
   normalize_obs: true
   normalize_reward: false
+  balanced_batches: false
   
   # PPO Parameters
   policy_type: MlpPolicy
