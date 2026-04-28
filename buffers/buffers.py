@@ -33,7 +33,7 @@ class RTRolloutBufferSamples(NamedTuple):
     
 
 class MultiRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, window_size=1, use_bh: bool = False, **kwargs):
+    def __init__(self, *args, window_size=1, use_bh: bool = False, balanced_batches: bool = False, **kwargs):
         """
         window_size = 1 means standard PPO buffer.
         window_size > 1 means we will keep data from the past `window_size-1` iterations.
@@ -41,6 +41,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         self.window_length = window_size
         self.history = deque(maxlen=max(0, window_size - 1))
         self.use_bh = use_bh and window_size > 1
+        self.balanced_batches = balanced_batches and window_size > 1
         self._combined_tensors = {}
 
         # super class init
@@ -198,6 +199,26 @@ class MultiRolloutBuffer(RolloutBuffer):
         self._combined_tensors.clear()
         super().reset()
 
+    def _yield_unbalanced(self, batch_size, window_id=None):
+        """Yields minibatches without window balancing, optionally filtered by window_id."""
+        total_size = self._combined_tensors["observations"].shape[0]
+
+        if window_id is not None:
+            valid_mask = self._combined_tensors["window_id"] == window_id
+            candidate_indices = np.where(valid_mask)[0]
+        else:
+            candidate_indices = np.arange(total_size)
+
+        indices = np.random.permutation(candidate_indices)
+        n_samples = len(indices)
+        if batch_size is None:
+            batch_size = n_samples
+
+        start_idx = 0
+        while start_idx < n_samples:
+            yield self._get_combined_samples(indices[start_idx: start_idx + batch_size])
+            start_idx += batch_size
+
     def get(self, batch_size=None, window_id: Optional[int] = None):
         '''
         Current situation:
@@ -260,24 +281,41 @@ class MultiRolloutBuffer(RolloutBuffer):
                     self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
 
         # Yield minibatches from the combined dataset
-        total_size = self._combined_tensors["observations"].shape[0]
+        n_windows = 1 + len(self.history) if self.window_length > 1 else 1
 
-        if window_id is not None:
-            valid_mask = self._combined_tensors["window_id"] == window_id
-            candidate_indices = np.where(valid_mask)[0]
-        else:
-            candidate_indices = np.arange(total_size)
+        # fallback
+        if (not self.balanced_batches
+                or window_id is not None
+                or n_windows == 1
+                or batch_size is None):
+            yield from self._yield_unbalanced(batch_size, window_id=window_id)
+            return
 
-        indices = np.random.permutation(candidate_indices)
+        # Balanced minibatch sampling: equal representation per window
+        per_window = batch_size // n_windows
+        if per_window == 0:
+            raise ValueError(
+                f"batch_size={batch_size} is too small for n_windows={n_windows}. "
+                f"Need batch_size >= {n_windows}."
+            )
 
-        n_samples = len(indices)
-        if batch_size is None:
-            batch_size = n_samples
+        # Shuffle each window's indices independently
+        window_indices = []
+        for wid in range(n_windows):
+            mask = self._combined_tensors["window_id"] == wid
+            candidates = np.where(mask)[0]
+            window_indices.append(np.random.permutation(candidates))
 
-        start_idx = 0
-        while start_idx < n_samples:
-            yield self._get_combined_samples(indices[start_idx : start_idx + batch_size])
-            start_idx += batch_size
+        # Number of complete balanced minibatches limited by the smallest window
+        n_minibatches = min(len(wi) for wi in window_indices) // per_window
+
+        for mb in range(n_minibatches):
+            batch = np.concatenate([
+                wi[mb * per_window: (mb + 1) * per_window]
+                for wi in window_indices
+            ])
+            batch = np.random.permutation(batch)  # shuffle within minibatch
+            yield self._get_combined_samples(batch)
 
 
 
