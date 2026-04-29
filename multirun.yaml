@@ -112,23 +112,24 @@ hydra:
     hydra:
     - hydra.mode=MULTIRUN
     task:
+    - experiment.env_name=Hopper-v5
     - experiment.dir_name=/work/fis1/RT-DeepRL/outputs
     - wandb.entity=alessandro-montenegro-polimi
     - wandb.project=temp
-    - wandb.tags=[]
-    - experiment.env_name=Hopper-v5
+    - wandb.tags=["K_fixed","B_fixed","wppo_1"]
     - experiment.norm_reward=False
-    - experiment.total_timesteps=1000000
-    - experiment.window_size=4
-    - experiment.weight_type=naive
-    - experiment.seed=0
+    - experiment.total_timesteps=300000
+    - experiment.n_minibatch=64
+    - experiment.window_size=2
+    - experiment.weight_type=bh,naive
+    - experiment.seed=0,1,2,3,4,5
   job:
     name: learn_ppo_test
     chdir: false
-    override_dirname: experiment.dir_name=/work/fis1/RT-DeepRL/outputs,experiment.env_name=Hopper-v5,experiment.norm_reward=False,experiment.seed=0,experiment.total_timesteps=1000000,experiment.weight_type=naive,experiment.window_size=4,wandb.entity=alessandro-montenegro-polimi,wandb.project=temp,wandb.tags=[]
+    override_dirname: experiment.dir_name=/work/fis1/RT-DeepRL/outputs,experiment.env_name=Hopper-v5,experiment.n_minibatch=64,experiment.norm_reward=False,experiment.seed=0,1,2,3,4,5,experiment.total_timesteps=300000,experiment.weight_type=bh,naive,experiment.window_size=2,wandb.entity=alessandro-montenegro-polimi,wandb.project=temp,wandb.tags=["K_fixed","B_fixed","wppo_1"]
     id: ???
     num: ???
-    config_name: ppo_from_geppo
+    config_name: ppo_hopper
     env_set: {}
     env_copy: []
     config:
@@ -166,21 +167,24 @@ wandb:
   entity: alessandro-montenegro-polimi
   project: temp
   sync_tensorboard: true
-  tags: []
+  tags:
+  - K_fixed
+  - B_fixed
+  - wppo_1
 experiment:
   env_name: Hopper-v5
   n_envs: 1
   dir_name: /work/fis1/RT-DeepRL/outputs
   norm_reward: false
   norm_obs: true
-  total_timesteps: 1000000
+  total_timesteps: 300000
   policy_type: MlpPolicy
   learning_rate: 0.0003
   n_steps: 2048
-  n_minibatch: 32
+  n_minibatch: 64
   n_epochs: 10
-  gamma: 0.995
-  gae_lambda: 0.97
+  gamma: 0.999
+  gae_lambda: 0.95
   clip_range: 0.2
   clip_range_vf: null
   normalize_advantage: true
@@ -196,9 +200,9 @@ experiment:
   tensorboard_log: null
   policy_kwargs: null
   verbose: 0
-  seed: 0
+  seed: 2026
   device: cpu
-  window_size: 4
+  window_size: 2
   on_policy_critic: true
   weight_type: naive
   sequential_window_training: false

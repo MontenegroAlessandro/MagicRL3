@@ -32,7 +32,8 @@ def get_full_config(cfg):
     else:
         weight_suffix = "-BH" if exp.weight_type == "bh" else "-N"
         seq_suffix = "-SEQ" if exp.sequential_window_training else ""
-        group_name = f"RT-PPO{seq_suffix}{weight_suffix} w={exp.window_size}"
+        critic_suffix = "ON" if exp.on_policy_critic else "OFF"
+        group_name = f"wPPO{seq_suffix}{weight_suffix} w={exp.window_size} critic={critic_suffix}"
 
     group_name += (
         f" {exp.n_envs}x{exp.n_steps}={exp.n_envs * exp.n_steps}"

@@ -1,5 +1,6 @@
 wandb:
-  project: rt-ppo-hc-3
+  entity: null
+  project: null
   sync_tensorboard: true
   tags: null
 
@@ -48,6 +49,6 @@ experiment:
   fresh_adv: false # true
 
   # Eval parameters
-  eval_freq: 10000
-  n_eval_episodes: 10
-  n_eval_envs: 10
+  eval_freq: 10_000
+  n_eval_episodes: 50
+  n_eval_envs: 1

@@ -5,13 +5,13 @@ set -euo pipefail
 
 
 # to change
-WANDB_PROJECT="daje-rt-ppo-hopper"
-ENV_NAME="Hopper-v5"
-CONFIG_NAME="ppo_hopper"
+WANDB_PROJECT="daje-rt-ppo-swimmer"
+ENV_NAME="Swimmer-v5"
+CONFIG_NAME="ppo_swimmer"
 N_EPOCHS=10
-N_MINIBATCH=32
-N_STEPS=2048
-CPU_SET=""
+N_MINIBATCH=16
+N_STEPS=1024
+CPU_SET="23"
 NORM_REW="False"
 TOT_TIMESTEPS="1000000"
 
@@ -35,9 +35,7 @@ for w in 2 4 8; do
     wandb.entity="${WANDB_ENTITY}" \
     wandb.project="${WANDB_PROJECT}" \
     wandb.tags="${TAGS}" \
-    \
-    experiment.norm_reward="${NORM_REW}" \
-    experiment.total_timesteps="${TOT_TIMESTEPS}" \
+    \z
     \
     experiment.n_steps="${w_N_STEPS}" \
     \

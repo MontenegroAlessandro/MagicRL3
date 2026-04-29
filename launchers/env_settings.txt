@@ -16,10 +16,10 @@ ENV_NAME="Swimmer-v5"
 CONFIG_NAME="ppo_swimmer"
 N_EPOCHS=10
 N_MINIBATCH=16
-N_STEPS=512
+N_STEPS=1024
 CPU_SET=""
 NORM_REW="False"
-TOT_TIMESTEPS="3000000"
+TOT_TIMESTEPS="1000000"
 
 
 ========= ant ==========
@@ -30,6 +30,18 @@ N_EPOCHS=10
 N_MINIBATCH=16
 N_STEPS=512
 CPU_SET=""
-NORM_REW="True"
+NORM_REW="False"
 TOT_TIMESTEPS="3000000"
+
+
+========= reacher ==========
+WANDB_PROJECT="daje-rt-ppo-reacher"
+ENV_NAME="Reacher-v5"
+CONFIG_NAME="ppo_reacher"
+N_EPOCHS=5
+N_MINIBATCH=16
+N_STEPS=512
+CPU_SET=""
+NORM_REW="False"
+TOT_TIMESTEPS="1000000"
 

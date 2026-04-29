@@ -33,7 +33,7 @@ class RTRolloutBufferSamples(NamedTuple):
     
 
 class MultiRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, window_size=1, use_bh: bool = False, **kwargs):
+    def __init__(self, *args, window_size=1, use_bh: bool = False, balanced_batches: bool = False, **kwargs):
         """
         window_size = 1 means standard PPO buffer.
         window_size > 1 means we will keep data from the past `window_size-1` iterations.
@@ -41,6 +41,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         self.window_length = window_size
         self.history = deque(maxlen=max(0, window_size - 1))
         self.use_bh = use_bh and window_size > 1
+        self.balanced_batches = balanced_batches and window_size > 1
         self._combined_tensors = {}
 
         # super class init
@@ -198,6 +199,25 @@ class MultiRolloutBuffer(RolloutBuffer):
         self._combined_tensors.clear()
         super().reset()
 
+    def _yield_unbalanced(self, batch_size, window_id=None):
+        """Yields minibatches without window balancing, optionally filtered by window_id."""
+        total_size = self._combined_tensors["observations"].shape[0]
+
+        if window_id is not None:
+            valid_mask = self._combined_tensors["window_id"] == window_id
+            candidate_indices = np.where(valid_mask)[0]
+        else:
+            candidate_indices = np.arange(total_size)
+
+        indices = np.random.permutation(candidate_indices)
+        n_samples = len(indices)
+        if batch_size is None:
+            batch_size = n_samples
+
+        start_idx = 0
+        while start_idx < n_samples:
+            yield self._get_combined_samples(indices[start_idx: start_idx + batch_size])
+            start_idx += batch_size
 
     def get(self, batch_size=None, window_id: Optional[int] = None):
         '''
@@ -224,62 +244,78 @@ class MultiRolloutBuffer(RolloutBuffer):
                 self._current_all_log_probs = self.swap_and_flatten(self._current_all_log_probs)
             self.generator_ready = True
 
+            current_size = self.__dict__["observations"].shape[0]
 
-        current_size = self.__dict__["observations"].shape[0]
+            # If no history, just link the combined tensors to the current arrays
+            if self.window_length == 1 or len(self.history) == 0:
+                for tensor in _tensor_names:
+                    self._combined_tensors[tensor] = self.__dict__[tensor]
 
-        # If no history, just link the combined tensors to the current arrays
-        if self.window_length == 1 or len(self.history) == 0:
-            for tensor in _tensor_names:
-                self._combined_tensors[tensor] = self.__dict__[tensor]
+                # All samples are on-policy
+                self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
+                self._combined_tensors["window_id"] = np.zeros(current_size, dtype=np.float32)
 
-            # All samples are on-policy
-            self._combined_tensors["on_policy_mask"] = np.ones(current_size, dtype=np.float32)
-            self._combined_tensors["window_id"] = np.zeros(current_size, dtype=np.float32)
+                if self.use_bh:
+                    self._combined_tensors["all_log_probs"] = self._current_all_log_probs
 
-            if self.use_bh:
-                self._combined_tensors["all_log_probs"] = self._current_all_log_probs
+            else:
+                for tensor in _tensor_names:
+                    tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
+                    self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
 
-        else:
-            for tensor in _tensor_names:
-                tensors_to_concat = [self.__dict__[tensor]] + [h[tensor] for h in self.history]
-                self._combined_tensors[tensor] = np.concatenate(tensors_to_concat, axis=0)
+                # Build on-policy mask: 1.0 for current, 0.0 for past
+                total_size = self._combined_tensors["observations"].shape[0]
+                mask = np.zeros(total_size, dtype=np.float32)
+                mask[:current_size] = 1.0
+                self._combined_tensors["on_policy_mask"] = mask
 
-            # Build on-policy mask: 1.0 for current, 0.0 for past
-            total_size = self._combined_tensors["observations"].shape[0]
-            mask = np.zeros(total_size, dtype=np.float32)
-            mask[:current_size] = 1.0
-            self._combined_tensors["on_policy_mask"] = mask
+                # Build window_id: 0 for current, 1 for previous, ... , w-1 for oldest in the window
+                window_ids = np.zeros(current_size, dtype=np.float32)  # current rollout = 0
+                for i, h in enumerate(self.history):
+                    size = h["observations"].shape[0]
+                    window_ids = np.concatenate([window_ids, np.full(size, i + 1, dtype=np.float32)])
+                self._combined_tensors["window_id"] = window_ids
 
-            # Build window_id: 0 for current, 1 for previous, ... , w-1 for oldest in the window
-            window_ids = np.zeros(current_size, dtype=np.float32)  # current rollout = 0
-            for i, h in enumerate(self.history):
-                size = h["observations"].shape[0]
-                window_ids = np.concatenate([window_ids, np.full(size, i + 1, dtype=np.float32)])
-            self._combined_tensors["window_id"] = window_ids
-
-            if self.use_bh:
-                all_log_probs_to_concat = [self._current_all_log_probs] + [h["all_log_probs"] for h in self.history]
-                self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
+                if self.use_bh:
+                    all_log_probs_to_concat = [self._current_all_log_probs] + [h["all_log_probs"] for h in self.history]
+                    self._combined_tensors["all_log_probs"] = np.concatenate(all_log_probs_to_concat, axis=0)
 
         # Yield minibatches from the combined dataset
-        total_size = self._combined_tensors["observations"].shape[0]
+        n_windows = 1 + len(self.history) if self.window_length > 1 else 1
 
-        if window_id is not None:
-            valid_mask = self._combined_tensors["window_id"] == window_id
-            candidate_indices = np.where(valid_mask)[0]
-            indices = np.random.permutation(candidate_indices)
-        else:
-            indices = self._build_balanced_indices(self._combined_tensors["window_id"])
+        # fallback
+        if (not self.balanced_batches
+                or window_id is not None
+                or n_windows == 1
+                or batch_size is None):
+            yield from self._yield_unbalanced(batch_size, window_id=window_id)
+            return
 
+        # Balanced minibatch sampling: equal representation per window
+        per_window = batch_size // n_windows
+        if per_window == 0:
+            raise ValueError(
+                f"batch_size={batch_size} is too small for n_windows={n_windows}. "
+                f"Need batch_size >= {n_windows}."
+            )
 
-        n_samples = len(indices)
-        if batch_size is None:
-            batch_size = n_samples
+        # Shuffle each window's indices independently
+        window_indices = []
+        for wid in range(n_windows):
+            mask = self._combined_tensors["window_id"] == wid
+            candidates = np.where(mask)[0]
+            window_indices.append(np.random.permutation(candidates))
 
-        start_idx = 0
-        while start_idx < n_samples:
-            yield self._get_combined_samples(indices[start_idx : start_idx + batch_size])
-            start_idx += batch_size
+        # Number of complete balanced minibatches limited by the smallest window
+        n_minibatches = min(len(wi) for wi in window_indices) // per_window
+
+        for mb in range(n_minibatches):
+            batch = np.concatenate([
+                wi[mb * per_window: (mb + 1) * per_window]
+                for wi in window_indices
+            ])
+            batch = np.random.permutation(batch)  # shuffle within minibatch
+            yield self._get_combined_samples(batch)
 
 
 
@@ -299,21 +335,3 @@ class MultiRolloutBuffer(RolloutBuffer):
             data += (self._combined_tensors["all_log_probs"][batch_inds],)
 
         return RTRolloutBufferSamples(*tuple(map(self.to_torch, data)))
-
-        
-    def _build_balanced_indices(self, window_ids: np.ndarray) -> np.ndarray:
-        unique_window_ids = np.unique(window_ids)
-        shuffled_window_ids = np.random.permutation(unique_window_ids)
-        indices_per_window = [
-            np.random.permutation(np.flatnonzero(window_ids == wid))
-            for wid in shuffled_window_ids
-        ]
-
-        max_window_size = max(len(indices) for indices in indices_per_window)
-        balanced_indices = []
-        for offset in range(max_window_size):
-            for indices in indices_per_window:
-                if offset < len(indices):
-                    balanced_indices.append(indices[offset])
-
-        return np.asarray(balanced_indices, dtype=np.int64)

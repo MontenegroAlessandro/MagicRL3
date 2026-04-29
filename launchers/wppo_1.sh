@@ -5,22 +5,22 @@ set -euo pipefail
 
 
 # to change
-WANDB_PROJECT="daje-rt-ppo-hopper"
+WANDB_PROJECT="temp"
 ENV_NAME="Hopper-v5"
 CONFIG_NAME="ppo_hopper"
 N_EPOCHS=10
 N_MINIBATCH=32
 N_STEPS=2048
-CPU_SET=""
 NORM_REW="False"
-TOT_TIMESTEPS="1000000"
+TOT_TIMESTEPS="300000"
+CPU_SET="1"
 
 
 # fixed
 WANDB_ENTITY="alessandro-montenegro-polimi"
 OUTPUT_DIR="/work/fis1/RT-DeepRL/outputs"
 TAGS='["K_fixed","B_fixed","wppo_1"]'
-SEEDS="0,1,2,3,4,5,6,7,8,9"
+SEEDS="0,1,2,3,4,5"
 
 
 for w in 2 4 8; do

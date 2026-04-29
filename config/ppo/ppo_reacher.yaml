@@ -1,5 +1,4 @@
-# PPO parameters for hopper
-# default with gamma=0.999
+# parameters from alessandro's tuning for reacher (rl zoo)
 
 wandb:
   entity: null
@@ -18,20 +17,20 @@ experiment:
   # Training
   total_timesteps: 1e6 
 
-  # PPO Parameters
+  # PPO Default Parameters
   policy_type: MlpPolicy
-  learning_rate: 3e-4  
-  n_steps: 2048 # 256         
-  n_minibatch: 32
-  n_epochs: 10         
-  gamma: 0.999          
-  gae_lambda: 0.95    
-  clip_range: 0.2      
+  learning_rate: 0.000104019 
+  n_steps: 512 # 256         
+  n_minibatch: 16
+  n_epochs: 5         
+  gamma: 0.9  
+  gae_lambda: 1.0    
+  clip_range: 0.3     
   clip_range_vf: null
   normalize_advantage: true 
-  ent_coef: 0.0            
-  vf_coef: 0.5             
-  max_grad_norm: 0.5       
+  ent_coef: 7.52585e-08            
+  vf_coef: 0.950368             
+  max_grad_norm: 0.9      
   use_sde: false
   sde_sample_freq: -1
   rollout_buffer_class: null
@@ -50,19 +49,9 @@ experiment:
   weight_type: naive # "naive" or "bh"
   sequential_window_training: false # true
   fresh_adv: false # true
+  balanced_batches: true
 
   # Eval parameters
-  eval_freq: 10_000
+  eval_freq: 10000
   n_eval_episodes: 50
   n_eval_envs: 1
-
-
-hydra:
-  run:
-    dir: .
-  sweep:
-    dir: .
-    subdir: .
-  output_subdir: null
-  job:
-    chdir: false

@@ -5,13 +5,13 @@ set -euo pipefail
 
 
 # to change
-WANDB_PROJECT="daje-rt-ppo-hopper"
-ENV_NAME="Hopper-v5"
-CONFIG_NAME="ppo_hopper"
+WANDB_PROJECT="daje-rt-ppo-swimmer"
+ENV_NAME="Swimmer-v5"
+CONFIG_NAME="ppo_swimmer"
 N_EPOCHS=10
-N_MINIBATCH=32
-N_STEPS=2048
-CPU_SET=""
+N_MINIBATCH=16
+N_STEPS=1024
+CPU_SET="22"
 NORM_REW="False"
 TOT_TIMESTEPS="1000000"
 
