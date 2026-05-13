@@ -129,7 +129,8 @@ class Reinforce(TrajectoryOnPolicyAlgorithm):
 
             self.policy.optimizer.zero_grad()
             loss.backward()
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            if self.max_grad_norm is not None:
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.policy.optimizer.step()
 
         self._n_updates += 1

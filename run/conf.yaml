@@ -16,9 +16,9 @@ experiment:
   # REINFORCE hyperparameters
   policy_type: MlpPolicy
   learning_rate: 1e-3
-  n_steps: 200           # maximum trajectory horizon (hard cap)
+  n_steps: 1000           # maximum trajectory horizon (hard cap)
   gamma: 1
-  max_grad_norm: 0.5
+  max_grad_norm: null
   ent_coef: 0.0           
   normalize_returns: false 
   # Exploration
@@ -39,3 +39,4 @@ experiment:
     activation_fn: tanh
     log_std_init: 0.0
     ortho_init: true
+    learn_std: false

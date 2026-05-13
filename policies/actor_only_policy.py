@@ -48,6 +48,7 @@ class ActorOnlyPolicy(BasePolicy):
         ortho_init: bool = True,
         use_sde: bool = False,
         log_std_init: float = 0.0,
+        learn_std: bool = True,
         full_std: bool = True,
         use_expln: bool = False,
         squash_output: bool = False,
@@ -82,6 +83,7 @@ class ActorOnlyPolicy(BasePolicy):
         self.activation_fn = activation_fn
         self.ortho_init = ortho_init
         self.log_std_init = log_std_init
+        self.learn_std = learn_std
         self.use_sde = use_sde
         self.dist_kwargs = None
 
@@ -109,6 +111,7 @@ class ActorOnlyPolicy(BasePolicy):
                 activation_fn=self.activation_fn,
                 use_sde=self.use_sde,
                 log_std_init=self.log_std_init,
+                learn_std=self.learn_std,
                 squash_output=default_none_kwargs["squash_output"],
                 full_std=default_none_kwargs["full_std"],
                 use_expln=default_none_kwargs["use_expln"],
@@ -139,10 +142,12 @@ class ActorOnlyPolicy(BasePolicy):
             self.action_net, self.log_std = self.action_dist.proba_distribution_net(
                 latent_dim=latent_dim_pi, log_std_init=self.log_std_init
             )
+            self.log_std.requires_grad_(self.learn_std)
         elif isinstance(self.action_dist, StateDependentNoiseDistribution):
             self.action_net, self.log_std = self.action_dist.proba_distribution_net(
                 latent_dim=latent_dim_pi, latent_sde_dim=latent_dim_pi, log_std_init=self.log_std_init
             )
+            self.log_std.requires_grad_(self.learn_std)
         elif isinstance(self.action_dist, (CategoricalDistribution, MultiCategoricalDistribution, BernoulliDistribution)):
             self.action_net = self.action_dist.proba_distribution_net(latent_dim=latent_dim_pi)
         else:
