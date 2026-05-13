@@ -11,8 +11,9 @@ from omegaconf import DictConfig, OmegaConf
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from algorithms import RT_PPO, MyPPO
-from buffers.buffers import MultiRolloutBuffer
+from algorithms import RT_PPO, MyPPO, RT_PPO2
+from stable_baselines3 import PPO
+from buffers.multi_rollout_buffer import MultiRolloutBuffer
 import torch.nn as nn
 
 @hydra.main(version_base=None, config_path=".", config_name="conf")
@@ -48,8 +49,8 @@ def main(cfg: DictConfig):
             base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
     else:
         # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
-        base_name = f"PPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
-    base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} opc={exp.on_policy_critic}"
+        base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
+    base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} opc={exp.on_policy_critic} eps={exp.clip_range}"
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
