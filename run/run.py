@@ -95,10 +95,15 @@ def main(cfg: DictConfig):
         verbose=2,
     )
 
+    if exp.eval_freq is not None:
+        callbacks = CallbackList([eval_callback, wandb_callback])
+    else:
+        callbacks = CallbackList([wandb_callback])
+
     model.learn(
         total_timesteps=int(exp.total_timesteps),
         progress_bar=True,
-        callback=CallbackList([wandb_callback, eval_callback]),
+        callback=callbacks,
     )
 
     env_name = str(exp.env_name).split("-")[0]

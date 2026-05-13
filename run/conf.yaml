@@ -27,7 +27,7 @@ experiment:
 
   # Logging / evaluation
   stats_window_size: 100
-  eval_freq: 10_000
+  eval_freq: null # 10_000
   n_eval_episodes: 50
   verbose: 0
   seed: 2026
