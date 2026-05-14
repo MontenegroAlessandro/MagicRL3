@@ -14,13 +14,20 @@ Before you begin, ensure you have Anaconda or Miniconda installed on your system
 
 **1. Clone the repository**
 ```bash
-git clone https://github.com/MontenegroAlessandro/RT-DeepRL.git
+git clone https://github.com/MontenegroAlessandro/RT-DeepRL.git [your_repo_name]
+```
+
+or 
+```bash
+git clone git@github.com:MontenegroAlessandro/MagicRL3.git [your_repo_name]
 ```
 
 then 
 ```bash
-cd your-repo-name
+cd your_repo_name
 ```
+
+**Note**: if you do not specify `your_repo_name`, the default folder name will be `MagicRL3`.
 
 **2. Make the setup script executable**
 Depending on your system's permissions, you may need to grant execution rights to the setup script:
@@ -33,12 +40,14 @@ chmod +x setup.sh
 Execute the script to build the environment:
 
 ```bash
-./setup.sh
+./setup.sh [personal_env_name]
 ```
 
 **4. Activate the environment**
 Once the setup is complete, activate the Conda environment to start working:
 
 ```bash
-conda activate rtpg
+conda activate personal_env_name
 ```
+
+**Note**: if you do not specify `personal_env_name`, then the default one will be `rtpg`.
