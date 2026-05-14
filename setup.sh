@@ -1,12 +1,18 @@
 #!/bin/bash
+set -e  # Tells bash to stop immediately if any command fails
 
 echo "Starting environment setup..."
 
-ENV_NAME="rtpg"
+ENV_NAME="${1:-rtpg}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda env create -f environment.yml -y
+
+echo "Wiping old environment if it exists to ensure a clean slate..."
+conda env remove --name "$ENV_NAME" -y || true 
+
+echo "Creating new environment..."
+conda env create -f environment.yml --name "$ENV_NAME" -y
+
 conda activate "$ENV_NAME"
-grep -v "file://" requirements.txt > requirements.txt
 pip install -r requirements.txt
 conda deactivate
 

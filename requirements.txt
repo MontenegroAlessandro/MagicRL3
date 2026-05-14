@@ -46,7 +46,7 @@ protobuf==6.33.5
 psutil==7.2.2
 pydantic==2.12.5
 pydantic_core==2.41.5
-pygame==2.1.0
+pygame>=2.1.2
 Pygments==2.19.2
 PyOpenGL==3.1.10
 pyparsing==3.3.2
