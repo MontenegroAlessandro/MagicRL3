@@ -14,7 +14,11 @@ Before you begin, ensure you have Anaconda or Miniconda installed on your system
 
 **1. Clone the repository**
 ```bash
-git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
+git clone https://github.com/MontenegroAlessandro/RT-DeepRL.git
+```
+
+then 
+```bash
 cd your-repo-name
 ```
 
