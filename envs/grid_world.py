@@ -3,6 +3,8 @@ from gymnasium import spaces
 import numpy as np
 from typing import Optional, Tuple
 
+# TODO: implement the rendering
+
 class GridWorld(gym.Env):
     """
     Continuous gridworld environment compatible with Stable Baselines 3.
@@ -86,3 +88,60 @@ class GridWorld(gym.Env):
 
     def close(self):
         pass
+
+class GridWorldWalls(GridWorld):
+    """
+    GridWorld with a U-shaped obstacle (soft walls) around the goal.
+
+    The U opens upward (+y). Three penalty zones surround the goal:
+      left arm  : x ∈ (0.35W, 0.45W),  y ∈ (0.35H, 0.65H)
+      right arm : x ∈ (0.55W, 0.65W),  y ∈ (0.35H, 0.65H)
+      bottom bar: x ∈ (0.35W, 0.65W),  y ∈ (0.25H, 0.35H)
+    The goal at (0.5W, 0.5H) lies in the U interior and is never inside a wall.
+    The agent must enter from above (y > 0.65H) to reach the goal.
+
+    Reward: w0 * r_distance + w1 * r_obstacle
+      r_distance : -||state - goal||       (dense distance penalty)
+      r_obstacle : -1 if inside a wall zone, 0 otherwise
+    Both components are returned in info under "r_distance" / "r_obstacle".
+    """
+    def __init__(
+            self, render_mode=None,
+            grid_dimension: Tuple[float, float] = (10, 10),
+            max_radius: float = .1,
+            starting_state: Optional[Tuple[float, float]] = None,
+            randomize_starting_state: bool = False,
+            goal_tolerance: float = .1,
+            reward_weights: Tuple[float, float] = (1.0, 1.0),
+            ):
+        super().__init__(
+            render_mode,
+            grid_dimension,
+            max_radius,
+            starting_state,
+            randomize_starting_state,
+            goal_tolerance,
+        )
+        self.name = "GridWorldWalls"
+        assert len(reward_weights) == 2, f"[{self.name}] reward_weights must be a tuple of size 2"
+        self.reward_weights = np.array(reward_weights, dtype=np.float32)
+
+    def _check_wall(self) -> bool:
+        x, y = self._state
+        W, H = self.grid_dimension
+        in_left_arm   = (W * 0.35 < x < W * 0.45) and (H * 0.35 < y < H * 0.65)
+        in_right_arm  = (W * 0.55 < x < W * 0.65) and (H * 0.35 < y < H * 0.65)
+        in_bottom_bar = (W * 0.35 < x < W * 0.65) and (H * 0.25 < y < H * 0.35)
+        return in_left_arm or in_right_arm or in_bottom_bar
+
+    def step(self, action):
+        self._state = self._compute_next_state(action)
+        obs = self._state.astype(np.float32)
+
+        r_distance = float(-np.linalg.norm(self._state - self.goal_position))
+        r_obstacle = -1.0 if self._check_wall() else 0.0
+        reward = float(self.reward_weights @ np.array([r_distance, r_obstacle], dtype=np.float32))
+
+        terminated = self._check_absorbed()
+        info = {"r_distance": r_distance, "r_obstacle": r_obstacle}
+        return obs, reward, terminated, False, info

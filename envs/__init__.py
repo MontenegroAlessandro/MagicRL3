@@ -6,3 +6,9 @@ register(
     entry_point="envs.grid_world:GridWorld",
     max_episode_steps=1000,
 )
+
+register(
+    id="GridWorldWalls-v0",
+    entry_point="envs.grid_world:GridWorldWalls",
+    max_episode_steps=1000,
+)
