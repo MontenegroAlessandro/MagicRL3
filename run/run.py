@@ -114,8 +114,10 @@ def main(cfg: DictConfig):
         eval_env_render = gym.make(exp.env_name, render_mode="human")
         obs, _ = eval_env_render.reset()
         for _ in range(1000):
-            action, _ = model.predict(obs, deterministic=True)
+            obs_input = env.normalize_obs(obs) if exp.normalize_obs else obs
+            action, _ = model.predict(obs_input, deterministic=True)
             obs, _, terminated, truncated, _ = eval_env_render.step(action)
+            print(f"Obs: {obs}, Action: {action}, Terminated: {terminated}, Truncated: {truncated}")
             if terminated or truncated:
                 obs, _ = eval_env_render.reset()
         eval_env_render.close()
