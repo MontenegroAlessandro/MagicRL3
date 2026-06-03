@@ -152,33 +152,71 @@ class MultiRolloutBuffer(RolloutBuffer):
 
     def recompute_advantages(self, policy) -> None:
         """
-        Replace stored advantages for off-policy windows with: 
-            A(s, a, φ_current) = returns - V_φ_current(s)
-        Only touches window_id > 0 entries in _combined_tensors.
-        Window 0 is left untouched (already correct).
-        NOTE: returns are stale!
+        When this method is called, then we recompute the advantage estimates fro the data in the window.
+        This is achieved by employing VTRACE (with trunctation hard-coded to 1.0 for simplicity).
+        Notice that this procedure will be done also for the on-policy data, since they where computed via GAE if the
+        flag for activating this method is set to False.
+        Notice that the return estimates too will no longer be stale and can in principle be used to fit the critic.
         """
         assert self.generator_ready, "Call get() first to build _combined_tensors"
 
-        off_policy_mask = self._combined_tensors["window_id"] > 0  # numpy bool array
-        if not off_policy_mask.any():
-            return
-
-        obs = self._combined_tensors["observations"][off_policy_mask]
-        returns = self._combined_tensors["returns"][off_policy_mask]
+        obs = self._combined_tensors["observations"]
+        actions = self._combined_tensors["actions"]
+        old_log_probs = self._combined_tensors["log_probs"].flatten()
+        rewards = self._combined_tensors["rewards"].flatten()
 
         obs_t = th.as_tensor(obs).to(policy.device)
-        with th.no_grad():
-            fresh_values = policy.predict_values(obs_t).cpu().numpy().flatten()
+        actions_t = th.as_tensor(actions).to(policy.device)
 
-        new_advantages = (returns.flatten() - fresh_values).reshape(-1, 1)
-        self._combined_tensors["advantages"][off_policy_mask] = new_advantages
+        with th.no_grad():
+            fresh_values_t, new_log_prob_t, _ = policy.evaluate_actions(obs_t, actions_t)
+
+        fresh_values = fresh_values_t.cpu().numpy().flatten()
+        new_log_probs = new_log_prob_t.cpu().numpy().flatten()
+
+        # V-TRACE IS ratios clipped to 1.0: rho_bar_t = min(1, pi_current / pi_behavioral)
+        rho_bar = np.minimum(1.0, np.exp(new_log_probs - old_log_probs))
+
+        n = self.buffer_size   # n_steps per rollout
+        m = self.n_envs
+        n_rollouts = obs.shape[0] // (n * m)
+
+        # Reshape to (n_rollouts, n_envs, n_steps); each rollout chunk is [env0_steps, env1_steps, ...]
+        rho = rho_bar.reshape(n_rollouts, m, n)
+        V = fresh_values.reshape(n_rollouts, m, n)
+        R = rewards.reshape(n_rollouts, m, n)
+
+        # Backward pass — GAE with V-TRACE IS correction (matches reference gae_vtrace).
+        #
+        # Advantage:    A_t = δ'_t + γλ · c_{t+1} · A_{t+1}
+        # Value target: v_t = c_t · A_t + V(s_t)           (≡ rtg = adv * ratio_trunc + V)
+        #
+        # where δ'_t = r_t + γ V(s_{t+1}) - V(s_t)  (raw TD error, no IS weight on first term)
+        # and   c_t  = min(1, π_k(a_t|s_t) / π_behavioral(a_t|s_t))
+        v_trace = np.zeros_like(V)
+        adv = np.zeros_like(V)
+
+        V_next = np.zeros((n_rollouts, m))   # V(s_T) = 0  (bootstrap)
+        A_next = np.zeros((n_rollouts, m))   # A_T    = 0  (no future steps)
+        c_next = np.zeros((n_rollouts, m))   # c_T    = 0  (boundary)
+
+        for t in reversed(range(n)):
+            delta_t = R[:, :, t] + self.gamma * V_next - V[:, :, t]
+            adv[:, :, t] = delta_t + self.gamma * self.gae_lambda * c_next * A_next
+            v_trace[:, :, t] = rho[:, :, t] * adv[:, :, t] + V[:, :, t]
+            c_next = rho[:, :, t]
+            A_next = adv[:, :, t]
+            V_next = V[:, :, t]
+
+        self._combined_tensors["advantages"] = adv.reshape(-1, 1)
+        self._combined_tensors["returns"] = v_trace.reshape(-1, 1)
     
     def reset(self) -> None:
         if self.full and self.window_length > 1:
             entry = {
                 "observations": self.observations.copy(),
                 "actions": self.actions.copy(),
+                "rewards": self.rewards.copy(),
                 "values": self.values.copy(),
                 "log_probs": self.log_probs.copy(),
                 "advantages": self.advantages.copy(),
@@ -234,7 +272,7 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         assert self.full, "Rollout buffer must be full before sampling from it"
 
-        _tensor_names = ["observations", "actions", "values", "log_probs", "advantages", "returns"]
+        _tensor_names = ["observations", "actions", "rewards", "values", "log_probs", "advantages", "returns"]
 
         if not self.generator_ready:
             # Flatten current buffer arrays
