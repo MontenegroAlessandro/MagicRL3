@@ -1,0 +1,23 @@
+wandb:
+  project: rt-grpo
+  tags: []
+
+experiment:
+  model_name: Qwen/Qwen2-0.5B-Instruct
+
+  # Dataset
+  n_samples: 20
+  eval_ratio: 0.1
+  seed: 42
+
+  # Training
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  num_generations: 2
+  max_completion_length: 32
+  learning_rate: 1.0e-6
+  beta: 0.0          # KL penalty coefficient (0 = no KL)
+  epsilon: 0.2       # clipping range
+
+  logging_steps: 10
+  dir_name: results
