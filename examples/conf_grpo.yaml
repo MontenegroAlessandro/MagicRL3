@@ -1,3 +1,24 @@
+
+# ciclo sugli steps
+#  
+#   //Collect data
+#   estraggo un batch B di prompt dal dataset
+#   per ogni prompt campiono G completions con una certa temperatura
+#
+#   //Calcolo reward
+#   reward singola per ogni completion
+#   calcolo reward medio e std
+#   calcolo advantage per ogni completion 
+#   l advantage è condivisa e uguale tra tutti i token della stessa completion
+#
+#   //Ottimizzazione
+#   ciclo sulle epoche (o iterazioni)
+#     ciclo sui minibatch
+#       calcolo la loss PPO-style (o DAPO)
+#       backprop e update dei pesi
+  
+
+
 wandb:
   project: rt-grpo
   tags: []
@@ -5,19 +26,59 @@ wandb:
 experiment:
   model_name: Qwen/Qwen2-0.5B-Instruct
 
-  # Dataset
-  n_samples: 20
-  eval_ratio: 0.1
-  seed: 42
+  task_name: gsm8k      # arithmetic | gsm8k
+  reward_fn: reward_fn  # funzione reward nel modulo task
 
-  # Training
-  num_train_epochs: 1
-  per_device_train_batch_size: 2
-  num_generations: 2
-  max_completion_length: 32
-  learning_rate: 1.0e-6
-  beta: 0.0          # KL penalty coefficient (0 = no KL)
-  epsilon: 0.2       # clipping range
+  n_samples: 500        # campioni usati per il training
+  seed: 42               # seed globale (default: 42)
 
-  logging_steps: 10
-  dir_name: results
+  num_train_epochs: 2    # passate sull'intero dataset (default: 3.0)
+  max_steps: -1           # limite assoluto di step, -1 = nessun limite, sovrascrive num_train_epochs (default: -1)
+
+  per_device_train_batch_size: 8  # prompt per step, più alto = più stabile ma più lento (default: 8)
+  gradient_accumulation_steps: 1    # step accumulati prima dell'update, simula batch più grandi (default: 1)
+
+  learning_rate: 1.0e-6   # step size optimizer, più alto converge prima ma rischia instabilità (default: 1e-6)
+  lr_scheduler_type: linear  # come decade il lr nel tempo (default: linear)
+  warmup_ratio: 0.1        # frazione di step iniziali a lr crescente, stabilizza l'inizio (default: null)
+  warmup_steps: 0           # warmup in step assoluti, alternativa a warmup_ratio (default: 0)
+
+  optim: adamw_torch_fused  # optimizer per l'update dei pesi (default: adamw_torch_fused)
+  weight_decay: 0.0          # regolarizzazione L2 sui pesi (default: 0.0)
+  max_grad_norm: 0.3         # gradient clipping, evita esplosioni del gradiente (default: 1.0)
+
+  num_generations: 8       # completion per prompt, più alto = advantage più preciso ma più costo (default: 8)
+  num_iterations: 1         # epoche di update PPO-style sullo stesso batch di generazioni, μ in GRPO (default: 1)
+
+  beta: 0.0      # peso penalità KL, 0 = nessun vincolo sul modello di riferimento, DAPO (default: 0.0)
+  epsilon: 0.2          # clipping inferiore del ratio, PPO (default: 0.2)
+  epsilon_high: 0.28     # clipping superiore, Clip-Higher DAPO, favorisce exploration (default: null = usa epsilon)
+  delta: null              # clipping a due lati del ratio, INTELLECT-2, null = disattivato (default: null)
+
+  loss_type: dapo                   # normalizza la loss sui token attivi, elimina length bias (default: dapo)
+  scale_rewards: group               # normalizzazione dei reward: group/batch/none (default: group)
+  importance_sampling_level: token   # livello del ratio di importance sampling: token o sequence (default: token)
+  mask_truncated_completions: true   # esclude dalla loss le completion troncate, DAPO (default: false)
+  top_entropy_quantile: 1.0          # allena solo sui token a entropia più alta, 1.0 = tutti (default: 1.0)
+
+  max_completion_length: 128  # token massimi per completion, limita il collo di bottiglia in generazione (default: 256)
+  temperature: 1.0              # temperatura di sampling nella generazione (default: 1.0)
+  top_p: 1.0                     # nucleus sampling (default: 1.0)
+  top_k: 0                        # top-k sampling, 0 = disattivato (default: 0)
+  min_p: null                      # soglia minima di probabilità per il sampling (default: null)
+  repetition_penalty: 1.0           # penalità per token ripetuti (default: 1.0)
+  generation_batch_size: null        # prompt generati insieme prima dello split in mini-batch (default: null)
+  steps_per_generation: null          # update per ogni batch di generazioni (default: null)
+  shuffle_dataset: true                # mescola il dataset ad ogni epoca (default: true)
+
+  sync_ref_model: false        # risincronizza periodicamente il modello di riferimento sulla policy (default: false)
+  ref_model_mixup_alpha: 0.6    # peso del mix policy/ref model alla risincronizzazione (default: 0.6)
+  ref_model_sync_steps: 512      # ogni quanti step risincronizzare il ref model (default: 512)
+
+  eval_strategy: 'no'            # quando valutare: no/steps/epoch (default: no)
+  eval_steps: null                    # frequenza eval, allineata a logging_steps (default: null)
+  per_device_eval_batch_size: 8     # batch size in valutazione (default: 8)
+  num_generations_eval: 2            # completion per prompt in eval, basso per contenere il costo su CPU (default: null = usa num_generations)
+
+  logging_steps: 5      # frequenza di logging su WandB (default: 10)
+  dir_name: /storage/fis1/RT-DeepRL/results
