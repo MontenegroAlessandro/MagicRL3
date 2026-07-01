@@ -3,12 +3,12 @@ os.environ["HF_HOME"] = "/storage/fis1/hf_cache"
 
 import sys
 import torch
-torch.set_num_threads(8)  # sweet spot empirico: prova 1, 2, 4
 import importlib
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 
+from hydra.utils import get_method
 from trl import GRPOTrainer, GRPOConfig
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,9 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Componenti del nome del gruppo wandb: ogni entry è (etichetta, valore).
 # Modifica/aggiungi/rimuovi voci qui per cambiare cosa compare nel group name.
 def build_group_name(exp: DictConfig) -> str:
+    rew_label = "+".join(exp.reward_fns)
     parts = [
         "GRPO",
         f"[{exp.task_name}]",
+        f"rew={rew_label}",
         f"bs{exp.per_device_train_batch_size}",
         f"g{exp.num_generations}",
         f"lr{exp.learning_rate}",
@@ -32,9 +34,11 @@ def build_group_name(exp: DictConfig) -> str:
 @hydra.main(version_base=None, config_path=".", config_name="conf_grpo")
 def main(cfg: DictConfig):
     exp = cfg.experiment
+    torch.set_num_threads(exp.num_threads)
 
     task = importlib.import_module(f"tasks.{exp.task_name}")
-    reward_fn = getattr(task, exp.reward_fn)
+    reward_fns = [get_method(fn) for fn in exp.reward_fns]
+    reward_weights = list(exp.reward_weights) if exp.reward_weights is not None else None
     train_dataset, eval_dataset = task.make_dataset(exp.n_samples, exp.seed)
 
     group_name = build_group_name(exp)
@@ -43,10 +47,13 @@ def main(cfg: DictConfig):
     conf = OmegaConf.to_container(cfg, resolve=True)
     run = wandb.init(
         project=cfg.wandb.project,
+        entity=cfg.wandb.entity or None,
         config=conf,
         group=group_name,
         name=run_name,
-        tags=cfg.wandb.tags,
+        tags=list(cfg.wandb.tags),
+        notes=cfg.wandb.notes or None,
+        mode=cfg.wandb.mode,
     )
 
     grpo_cfg = GRPOConfig(
@@ -101,7 +108,8 @@ def main(cfg: DictConfig):
 
     trainer = GRPOTrainer(
         model=exp.model_name,
-        reward_funcs=reward_fn,
+        reward_funcs=reward_fns,
+        reward_weights=reward_weights,
         args=grpo_cfg,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,

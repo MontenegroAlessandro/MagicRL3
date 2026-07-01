@@ -21,18 +21,25 @@
 
 wandb:
   project: rt-grpo
+  entity: null           # team/user WandB (null = account di default)
   tags: []
+  notes: null            # descrizione libera della run
+  mode: online           # online | offline | disabled
 
 experiment:
   model_name: Qwen/Qwen2-0.5B-Instruct
 
   task_name: gsm8k      # arithmetic | gsm8k
-  reward_fn: reward_fn  # funzione reward nel modulo task
+  reward_fns:                 # path dotted completo: tasks.<modulo>.<funzione>
+    - tasks.gsm8k.accuracy_reward
+    - tasks.rewards.length_reward
+  reward_weights: [1.0, 0.3]         # pesi per ogni reward_fn (null = uniformi, es. [1.0, 0.3])
 
-  n_samples: 500        # campioni usati per il training
+  n_samples: 200        # campioni usati per il training
   seed: 42               # seed globale (default: 42)
+  num_threads: 8         # torch intraop threads per processo
 
-  num_train_epochs: 2    # passate sull'intero dataset (default: 3.0)
+  num_train_epochs: 3    # passate sull'intero dataset (default: 3.0)
   max_steps: -1           # limite assoluto di step, -1 = nessun limite, sovrascrive num_train_epochs (default: -1)
 
   per_device_train_batch_size: 8  # prompt per step, più alto = più stabile ma più lento (default: 8)
@@ -47,7 +54,7 @@ experiment:
   weight_decay: 0.0          # regolarizzazione L2 sui pesi (default: 0.0)
   max_grad_norm: 0.3         # gradient clipping, evita esplosioni del gradiente (default: 1.0)
 
-  num_generations: 8       # completion per prompt, più alto = advantage più preciso ma più costo (default: 8)
+  num_generations: 16       # completion per prompt, più alto = advantage più preciso ma più costo (default: 8)
   num_iterations: 1         # epoche di update PPO-style sullo stesso batch di generazioni, μ in GRPO (default: 1)
 
   beta: 0.0      # peso penalità KL, 0 = nessun vincolo sul modello di riferimento, DAPO (default: 0.0)
@@ -61,7 +68,7 @@ experiment:
   mask_truncated_completions: true   # esclude dalla loss le completion troncate, DAPO (default: false)
   top_entropy_quantile: 1.0          # allena solo sui token a entropia più alta, 1.0 = tutti (default: 1.0)
 
-  max_completion_length: 128  # token massimi per completion, limita il collo di bottiglia in generazione (default: 256)
+  max_completion_length: 256  # token massimi per completion, limita il collo di bottiglia in generazione (default: 256)
   temperature: 1.0              # temperatura di sampling nella generazione (default: 1.0)
   top_p: 1.0                     # nucleus sampling (default: 1.0)
   top_k: 0                        # top-k sampling, 0 = disattivato (default: 0)
@@ -75,8 +82,8 @@ experiment:
   ref_model_mixup_alpha: 0.6    # peso del mix policy/ref model alla risincronizzazione (default: 0.6)
   ref_model_sync_steps: 512      # ogni quanti step risincronizzare il ref model (default: 512)
 
-  eval_strategy: 'no'            # quando valutare: no/steps/epoch (default: no)
-  eval_steps: null                    # frequenza eval, allineata a logging_steps (default: null)
+  eval_strategy: 'steps'            # quando valutare: no/steps/epoch (default: no)
+  eval_steps: 5                    # frequenza eval, allineata a logging_steps (default: null)
   per_device_eval_batch_size: 8     # batch size in valutazione (default: 8)
   num_generations_eval: 2            # completion per prompt in eval, basso per contenere il costo su CPU (default: null = usa num_generations)
 
