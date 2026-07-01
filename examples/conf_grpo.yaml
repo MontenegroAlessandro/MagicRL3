@@ -31,7 +31,7 @@ experiment:
 
   task_name: gsm8k      # arithmetic | gsm8k
   reward_fns:                 # path dotted completo: tasks.<modulo>.<funzione>
-    - tasks.gsm8k.accuracy_reward
+    - trl.rewards.accuracy_reward
     - tasks.rewards.length_reward
   reward_weights: [1.0, 0.3]         # pesi per ogni reward_fn (null = uniformi, es. [1.0, 0.3])
 
