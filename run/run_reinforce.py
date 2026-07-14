@@ -15,7 +15,7 @@ import envs  # triggers the registration of new envs
 from algorithms import Reinforce
 
 
-@hydra.main(version_base=None, config_path=".", config_name="conf")
+@hydra.main(version_base=None, config_path="configs", config_name="conf_reinforce")
 def main(cfg: DictConfig):
     exp = cfg.experiment
 
@@ -34,6 +34,7 @@ def main(cfg: DictConfig):
         group=base_name,
         name=f"{base_name} seed={exp.seed}",
         tags=cfg.wandb.tags,
+        dir=exp.dir_name,
     )
 
     # --- Training env ---

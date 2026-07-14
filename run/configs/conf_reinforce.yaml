@@ -1,3 +1,7 @@
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d_%H-%M-%S}
+
 wandb:
   project: reinforce
   sync_tensorboard: true
@@ -8,7 +12,7 @@ experiment:
   env_name: CartPole-v1
   n_envs: 20
   total_timesteps: 1_000_000
-  dir_name: results
+  dir_name: /storage/fis1/RT-DeepRL/results
   render: false
   normalize_obs: true
   normalize_reward: false

@@ -2,7 +2,6 @@ import re
 import math
 from datasets import load_dataset, Dataset
 
-from trl.rewards import accuracy_reward  # re-exported for learn_test_grpo
 
 SYSTEM = (
     "You are a math assistant. Reason step by step, "

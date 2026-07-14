@@ -1,3 +1,7 @@
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d_%H-%M-%S}
+
 wandb:
   project: rt-ppo-hc-3
   sync_tensorboard: true
@@ -6,9 +10,9 @@ wandb:
 experiment:
   # ENV
   env_name: HalfCheetah-v5
-  n_envs: 1              
-  total_timesteps: 1e6 
-  dir_name: results
+  n_envs: 1
+  total_timesteps: 1e6
+  dir_name: /storage/fis1/RT-DeepRL/results
   render: false
   normalize_obs: true
   normalize_reward: false

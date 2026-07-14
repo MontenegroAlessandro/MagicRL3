@@ -3,6 +3,7 @@ os.environ["HF_HOME"] = "/storage/fis1/hf_cache"
 
 import sys
 import torch
+import functools
 import importlib
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -17,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Componenti del nome del gruppo wandb: ogni entry è (etichetta, valore).
 # Modifica/aggiungi/rimuovi voci qui per cambiare cosa compare nel group name.
 def build_group_name(exp: DictConfig) -> str:
-    rew_label = "+".join(exp.reward_fns)
+    rew_label = "+".join(spec.path.rsplit(".", 1)[-1] for spec in exp.reward_fns)
     parts = [
         "GRPO",
         f"[{exp.task_name}]",
@@ -31,15 +32,25 @@ def build_group_name(exp: DictConfig) -> str:
     return " ".join(parts)
 
 
-@hydra.main(version_base=None, config_path=".", config_name="conf_grpo")
+def load_reward_fn(spec):
+    fn = get_method(spec.path)
+    kwargs = {k: v for k, v in spec.items() if k != "path"}
+    if not kwargs:
+        return fn
+    partial_fn = functools.partial(fn, **kwargs)
+    functools.update_wrapper(partial_fn, fn)  # TRL legge __name__ per il logging
+    return partial_fn
+
+
+@hydra.main(version_base=None, config_path="configs", config_name="conf_grpo")
 def main(cfg: DictConfig):
     exp = cfg.experiment
     torch.set_num_threads(exp.num_threads)
 
-    task = importlib.import_module(f"tasks.{exp.task_name}")
-    reward_fns = [get_method(fn) for fn in exp.reward_fns]
-    reward_weights = list(exp.reward_weights) if exp.reward_weights is not None else None
+    task = importlib.import_module(f"llm_tasks.{exp.task_name}")
+    reward_fns = [load_reward_fn(spec) for spec in exp.reward_fns]
     train_dataset, eval_dataset = task.make_dataset(exp.n_samples, exp.seed)
+
 
     group_name = build_group_name(exp)
     run_name = f"{group_name} seed={exp.seed}"
@@ -54,11 +65,14 @@ def main(cfg: DictConfig):
         tags=list(cfg.wandb.tags),
         notes=cfg.wandb.notes or None,
         mode=cfg.wandb.mode,
+        dir=exp.dir_name,
     )
+    run_id = run.id
 
     grpo_cfg = GRPOConfig(
-        output_dir=f"{exp.dir_name}/grpo/{run.id}",
+        output_dir=f"{exp.dir_name}/grpo/{run_id}",
         seed=exp.seed,
+        model_init_kwargs={"dtype": exp.dtype},
         num_train_epochs=exp.num_train_epochs,
         max_steps=exp.max_steps,
         per_device_train_batch_size=exp.per_device_train_batch_size,
@@ -99,7 +113,7 @@ def main(cfg: DictConfig):
         num_generations_eval=exp.num_generations_eval,
         logging_steps=exp.logging_steps,
         report_to="wandb",
-        run_name=run.name,
+        run_name=run_name,
         save_strategy="no",
         use_cpu=True,
         log_completions=True,
@@ -109,7 +123,6 @@ def main(cfg: DictConfig):
     trainer = GRPOTrainer(
         model=exp.model_name,
         reward_funcs=reward_fns,
-        reward_weights=reward_weights,
         args=grpo_cfg,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
