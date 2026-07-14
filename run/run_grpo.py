@@ -13,14 +13,17 @@ from hydra.utils import get_method
 from trl import GRPOTrainer, GRPOConfig
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from algorithms.rt_grpo import RT_GRPOTrainer
 
 
 # Componenti del nome del gruppo wandb: ogni entry è (etichetta, valore).
 # Modifica/aggiungi/rimuovi voci qui per cambiare cosa compare nel group name.
 def build_group_name(exp: DictConfig) -> str:
     rew_label = "+".join(spec.path.rsplit(".", 1)[-1] for spec in exp.reward_fns)
+    algo_label = "GRPO" if exp.window_length < 1 else f"RT-GRPO w={exp.window_length} ({exp.is_weight_type})"
     parts = [
-        "GRPO",
+        algo_label,
         f"[{exp.task_name}]",
         f"rew={rew_label}",
         f"bs{exp.per_device_train_batch_size}",
@@ -120,13 +123,24 @@ def main(cfg: DictConfig):
         num_completions_to_print=4,
     )
 
-    trainer = GRPOTrainer(
-        model=exp.model_name,
-        reward_funcs=reward_fns,
-        args=grpo_cfg,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-    )
+    if exp.window_length < 1:
+        trainer = GRPOTrainer(
+            model=exp.model_name,
+            reward_funcs=reward_fns,
+            args=grpo_cfg,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    else:
+        trainer = RT_GRPOTrainer(
+            window_length=exp.window_length,
+            is_weight_type=exp.is_weight_type,
+            model=exp.model_name,
+            reward_funcs=reward_fns,
+            args=grpo_cfg,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
 
     trainer.train()
     wandb.finish()

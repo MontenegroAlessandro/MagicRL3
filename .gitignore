@@ -5,6 +5,10 @@ wandb/
 outputs/
 multirun/
 
+# istruzioni locali per Claude, non su git
+CLAUDE.md
+**/CLAUDE.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

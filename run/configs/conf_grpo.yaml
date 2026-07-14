@@ -102,3 +102,7 @@ experiment:
 
   logging_steps: 5      # frequenza di logging su WandB (default: 10)
   dir_name: /storage/fis1/RT-DeepRL/results
+
+  # Riutilizzo di generation event passati (RT-GRPO, vedi docs/rt_grpo_algo.md)
+  window_length: 0        # generation event totali per update (corrente + storici). 0 = GRPOTrainer standard di TRL, 1 = RT_GRPOTrainer senza history (stesso algoritmo di 0)
+  is_weight_type: naive    # correzione IS per i dati storici: solo naive implementato, bh richiede window_length-1 copie del modello in RAM

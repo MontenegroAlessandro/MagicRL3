@@ -154,3 +154,50 @@ fintantochè non colleziono n_samples * num_train_epochs prompt
             
 ```
 
+## Implementazione in TRL
+
+Il ciclo sopra è concettuale. A livello di codice, `GRPOTrainer` lo implementa agganciandosi a due hook
+del `Trainer` di HuggingFace (`_prepare_inputs` e `compute_loss`), non con un loop scritto a mano:
+
+```
+Trainer.train()                                        # loop esterno di HF, non modificato
+
+    per ogni generation_batch dal DataLoader:           # GBS prompt, non ancora generati
+
+        training_step(model, generation_batch)
+            inputs = _prepare_inputs(generation_batch)
+            loss   = compute_loss(model, inputs)         # -> _compute_loss(model, inputs)
+            backward(loss)
+
+
+_prepare_inputs(generation_batch):                       # <- qui vive il riuso "nativo" (num_iterations/SPG)
+
+    generate_every = steps_per_generation * num_iterations
+
+    se step % generate_every == 0 (o buffer vuoto):
+
+        batch = _generate_and_score_completions(generation_batch)   # ROLLOUT + REWARD/ADVANTAGE (punti 1 e 2)
+        batch = shuffle(batch)
+        buffered_inputs = split_tensor_dict(batch, steps_per_generation)   # SPG fette di size uguale
+
+    ritorna buffered_inputs[step % steps_per_generation]             # la fetta di turno, non rigenera
+
+
+_compute_loss(model, inputs):                             # punto 3, per una singola fetta
+
+    per_token_logps = forward(model, inputs)
+    ratio = exp(per_token_logps - inputs["old_per_token_logps"])
+    loss_token = -min(ratio * advantage, clip(ratio, 1-epsilon, 1+epsilon_high) * advantage)
+    ...
+    ritorna loss
+```
+
+Punti chiave:
+- Il DataLoader restituisce batch grandi (GBS prompt): è `_prepare_inputs`, non il DataLoader, a tagliarli
+  in SPG fette e a bufferizzarle in `self._buffered_inputs`.
+- `_generate_and_score_completions` viene chiamato solo una volta ogni `generate_every` step; le fette
+  successive vengono pescate dal buffer senza rigenerare — è il riuso "entro finestra" del punto 3.
+- `split_tensor_dict` taglia in fette di dimensione **esattamente uguale**: vincolo rilevante per RT-GRPO
+  (`algorithms/rt_grpo.py`), che mescola dati da rollout precedenti — il merge va fatto dopo questo split,
+  non prima, altrimenti la divisione in fette uguali si rompe.
+
