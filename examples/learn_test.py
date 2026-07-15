@@ -30,7 +30,14 @@ def main(cfg: DictConfig):
 
     # logger
     if exp.window_size > 1:
-        if not exp.sequential_window_training and not exp.fresh_adv:
+        if exp.weight_type == "geppo":
+            base_name = f"GePPO w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
+            # adjust the other parameters as prescribed by GePPO
+            exp.on_policy_critic = False # uses all data to update the critic
+            exp.fresh_adv = True # re-evaluates the advantages
+            exp.weight_type = "naive" # it uses naive weighting
+            exp.geppo_clip = True # it uses a specific way of clipping
+        elif not exp.sequential_window_training and not exp.fresh_adv:
             # base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
             weight = "BH" if exp.weight_type == "bh" else "N"
             base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size}) opc={exp.on_policy_critic}"
@@ -127,6 +134,7 @@ def main(cfg: DictConfig):
             sequential_window_training=exp.sequential_window_training,
             fresh_adv=exp.fresh_adv,
             on_policy_masking=exp.on_policy_masking,
+            geppo_clip=exp.geppo_clip,
             # Old PPO args
             policy=exp.policy_type,
             env=env,

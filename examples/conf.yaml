@@ -47,6 +47,7 @@ experiment:
   eval_freq: 10_000
   n_eval_episodes: 50
   on_policy_masking: false
+  geppo_clip: false
 
   # Reusing Trajectories
   window_size: 1 

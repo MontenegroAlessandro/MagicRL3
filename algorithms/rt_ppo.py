@@ -1,4 +1,5 @@
 from collections import deque
+import copy
 import warnings
 from typing import Any, ClassVar, Literal, Optional, TypeVar, Union
 
@@ -25,6 +26,7 @@ class RT_PPO(PPO):
             sequential_window_training: bool = False,
             fresh_adv: bool = False,
             on_policy_masking: bool = False,
+            geppo_clip: bool = False,
             *args,
             **kwargs,
         ):
@@ -44,6 +46,7 @@ class RT_PPO(PPO):
         self.sequential_window_training = sequential_window_training
         self.fresh_adv = fresh_adv
         self.on_policy_masking = on_policy_masking
+        self.geppo_clip = geppo_clip
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
@@ -175,6 +178,16 @@ class RT_PPO(PPO):
                         initial_bh_ratios_by_window.setdefault(w_int, []).append(w_bh.cpu())
         self.policy.set_training_mode(True)
 
+        # GePPO-style clipping: freeze a snapshot of the policy as it is right now
+        # (theta_k, before any gradient step in this train() call). During the
+        # epoch loop we evaluate it on each minibatch to get pi_{theta_k}(a|s),
+        # which together with old_log_prob (pi_{theta_{k-i}}(a|s), the policy that
+        # actually collected the sample) generalizes the "1" in the clip bounds.
+        reference_policy = None
+        if self.geppo_clip:
+            reference_policy = copy.deepcopy(self.policy)
+            reference_policy.set_training_mode(False)
+
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
             kl_triggered_windows = set()  # tracks which window_ids hit the KL threshold this epoch
@@ -207,7 +220,14 @@ class RT_PPO(PPO):
 
                     # clipped surrogate loss
                     policy_loss_1 = advantages * ratio
-                    policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                    if self.geppo_clip:
+                        # generalize the "1" to pi_{theta_k}(a|s) / pi_{theta_{k-i}}(a|s)
+                        with th.no_grad():
+                            _, ref_log_prob, _ = reference_policy.evaluate_actions(rollout_data.observations, actions)
+                        clip_center = th.exp(ref_log_prob - rollout_data.old_log_prob)
+                    else:
+                        clip_center = 1.0
+                    policy_loss_2 = advantages * th.clamp(ratio, clip_center - clip_range, clip_center + clip_range)
                     policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
                     # Logging
