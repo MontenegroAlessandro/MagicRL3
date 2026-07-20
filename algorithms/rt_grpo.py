@@ -15,7 +15,7 @@ from buffers.multi_generation_buffer import MultiGenerationBuffer
 # GRPOTrainer._compute_loss nella nuova versione prima di fidarsi dei risultati.
 _PINNED_TRL_VERSION = "1.7.0"
 
-IS_WEIGHT_TYPE = Literal["naive", "bh"]
+IS_WEIGHT_TYPE = Literal["naive", "bh", "mpm"]
 
 
 class RT_GRPOTrainer(GRPOTrainer):
@@ -40,17 +40,29 @@ class RT_GRPOTrainer(GRPOTrainer):
         le policy della finestra (stesso principio di RT_PPO._compute_ratio, adattato al caso
         per-token). Richiede tenere window_length-1 copie congelate del modello in RAM e forward
         pass extra ad ogni generation event — un warning stampa la stima di RAM all'avvio.
+        "mpm" (multiple power mean, Montenegro et al. 2026): ratio contro la mistura difensiva
+        (1-λ)·p_θi + λ·p_θ, con λ = mpm_lambda fisso e coefficienti α uniformi (impliciti nella
+        media del batch). Peso limitato da 1/λ (proprietà difensiva); stesso costo di naive:
+        nessuna copia del modello, nessun forward pass extra.
+    :param mpm_lambda: λ della correzione power-mean, usato solo con is_weight_type="mpm".
+        Estremi degeneri: 0 → identico a naive, 1 → ratio identicamente 1.
     """
 
-    def __init__(self, *args, window_length: int = 1, is_weight_type: IS_WEIGHT_TYPE = "naive", **kwargs):
+    def __init__(
+        self, *args, window_length: int = 1, is_weight_type: IS_WEIGHT_TYPE = "naive",
+        mpm_lambda: float = 0.1, **kwargs,
+    ):
         if window_length < 1:
             raise ValueError(
                 "window_length deve essere >= 1 per RT_GRPOTrainer; per il GRPOTrainer standard di "
                 "TRL usa window_length=0 nel wiring di run_grpo.py."
             )
+        if is_weight_type == "mpm" and not 0.0 <= mpm_lambda <= 1.0:
+            raise ValueError(f"mpm_lambda deve stare in [0, 1], ricevuto {mpm_lambda}.")
 
         self.window_length = window_length
         self.is_weight_type = is_weight_type
+        self.mpm_lambda = mpm_lambda
 
         super().__init__(*args, **kwargs)
 
@@ -207,6 +219,23 @@ class RT_GRPOTrainer(GRPOTrainer):
         old = inputs.get("old_per_token_logps")
         return per_token_logps.detach() if old is None else old
 
+    def _mpm_effective_old_logps(
+        self, per_token_logps: torch.Tensor, old_per_token_logps: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Densità comportamentale effettiva della correzione power-mean: log della mistura
+        difensiva (1-λ)·p_θi + λ·p_θ. Il ratio risultante p_θ / ((1-λ)·p_θi + λ·p_θ) è il peso
+        PM-corretto di RT-PG (Montenegro et al. 2026, Sez. 4), limitato da 1/λ. p_θ entra nel
+        denominatore staccato dal grafo: il denominatore è una costante comportamentale, come
+        old_per_token_logps nei casi naive/bh.
+        """
+        lam = per_token_logps.new_tensor(self.mpm_lambda)
+        stacked = torch.stack(
+            (torch.log1p(-lam) + old_per_token_logps, torch.log(lam) + per_token_logps.detach()),
+            dim=-1,
+        )
+        return torch.logsumexp(stacked, dim=-1)
+
     def _reduce_log_ratio(self, log_ratio: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Riduce log_ratio (per-token) secondo importance_sampling_level, come in GRPOTrainer._compute_loss."""
         if self.importance_sampling_level == "token":
@@ -237,6 +266,13 @@ class RT_GRPOTrainer(GRPOTrainer):
             else:
                 # Nessuna history disponibile per questo batch (es. primissimo step): bh degenera a naive.
                 old_per_token_logps = self._naive_old_logps(per_token_logps, inputs)
+        elif self.is_weight_type == "mpm":
+            old = inputs.get("old_per_token_logps")
+            if old is None:
+                # Senza old_per_token_logps il ratio naive sarebbe comunque 1: mpm degenera a naive.
+                old_per_token_logps = per_token_logps.detach()
+            else:
+                old_per_token_logps = self._mpm_effective_old_logps(per_token_logps, old)
         else:
             raise ValueError(f"is_weight_type sconosciuto: {self.is_weight_type!r}")
 
@@ -431,11 +467,11 @@ class RT_GRPOTrainer(GRPOTrainer):
             self._metrics[mode]["vespo/phi_seq_mean"].append(gathered_phi_seq.nanmean().item())
 
         # --- Aggiunta RT-GRPO: diagnostica per finestra/età dei dati (docs/rt_grpo_algo.md) ---
-        # Se bh è attivo, coef_1 è già quello operativo (bh); calcoliamo qui anche il ratio naive
+        # Se bh o mpm è attivo, coef_1 è già quello operativo; calcoliamo qui anche il ratio naive
         # (mai usato per la loss in quel caso) solo per il confronto in diagnostica, riusando gli
         # stessi helper di _compute_ratio.
         naive_coef_1 = None
-        if self.is_weight_type == "bh" and "all_log_probs" in inputs:
+        if (self.is_weight_type == "bh" and "all_log_probs" in inputs) or self.is_weight_type == "mpm":
             naive_log_ratio = per_token_logps - self._naive_old_logps(per_token_logps, inputs)
             naive_coef_1 = torch.exp(self._reduce_log_ratio(naive_log_ratio, mask))
 
@@ -458,9 +494,10 @@ class RT_GRPOTrainer(GRPOTrainer):
         (quest'ultima solo per i loss_type basati su clipping PPO-style), numero di campioni.
 
         Se `naive_coef_1` è None, `coef_1` è il ratio naive (bh non attivo) e viene loggato con i
-        nomi base (diagnostics_*/window_N). Se `naive_coef_1` è fornito (bh attivo), `coef_1` è il
-        ratio bh operativo: logghiamo il naive con i nomi base (com'era la policy comportamentale
-        "grezza" per riga) e il bh con suffisso `_bh`, per confrontarli nello stesso run.
+        nomi base (diagnostics_*/window_N). Se `naive_coef_1` è fornito (bh o mpm attivo),
+        `coef_1` è il ratio operativo: logghiamo il naive con i nomi base (com'era la policy
+        comportamentale "grezza" per riga) e l'operativo con suffisso `_bh`/`_mpm`, per
+        confrontarli nello stesso run.
 
         window_id/coef_1 hanno granularità per riga (una per completion), quindi il ratio è
         ridotto a un valore per riga (media mascherata sui token) prima di raggruppare per finestra.
@@ -471,7 +508,7 @@ class RT_GRPOTrainer(GRPOTrainer):
 
             ratio_variants = [("", reduce_to_row(naive_coef_1 if naive_coef_1 is not None else coef_1))]
             if naive_coef_1 is not None:
-                ratio_variants.append(("_bh", reduce_to_row(coef_1)))
+                ratio_variants.append((f"_{self.is_weight_type}", reduce_to_row(coef_1)))
 
             do_clip_diag = self.loss_type in ("grpo", "bnpo", "dr_grpo", "dapo", "luspo")
 

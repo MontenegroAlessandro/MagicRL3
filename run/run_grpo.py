@@ -22,7 +22,7 @@ from algorithms.rt_grpo import RT_GRPOTrainer
 # obbligatori): calcolato qui. La parte variabile del group name (quali parametri distinguono le
 # run di QUESTA campagna, come abbreviarli) è invece editoriale, non meccanica — vedi
 # experiment.group_name_suffix, impostato nel launcher di ogni lancio (CLAUDE.md).
-IS_WEIGHT_LABEL = {"naive": "N", "bh": "BH"}
+IS_WEIGHT_LABEL = {"naive": "N", "bh": "BH", "mpm": "MPM"}
 
 
 def build_group_name(exp: DictConfig) -> str:
@@ -151,6 +151,7 @@ def main(cfg: DictConfig):
         trainer = RT_GRPOTrainer(
             window_length=exp.window_length,
             is_weight_type=exp.is_weight_type,
+            mpm_lambda=exp.mpm_lambda,
             model=exp.model_name,
             reward_funcs=reward_fns,
             args=grpo_cfg,

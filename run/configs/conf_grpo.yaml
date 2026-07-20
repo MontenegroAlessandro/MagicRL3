@@ -107,7 +107,8 @@ experiment:
 
   # Riutilizzo di generation event passati (RT-GRPO, vedi docs/rt_grpo_algo.md)
   window_length: 0        # generation event totali per update (corrente + storici). 0 = GRPOTrainer standard di TRL, 1 = RT_GRPOTrainer senza history (stesso algoritmo di 0)
-  is_weight_type: naive    # correzione IS per i dati storici: naive | bh (bh tiene fino a window_length-1 copie congelate del modello in RAM)
+  is_weight_type: naive    # correzione IS per i dati storici: naive | bh (fino a window_length-1 copie congelate del modello in RAM) | mpm (power-mean con λ fisso, stesso costo di naive)
+  mpm_lambda: 0.1          # λ della correzione power-mean (solo is_weight_type=mpm): peso IS limitato da 1/λ; 0 → naive, 1 → ratio sempre 1
 
   # Finetuning parziale con LoRA (peft) al posto del full finetuning
   lora:
