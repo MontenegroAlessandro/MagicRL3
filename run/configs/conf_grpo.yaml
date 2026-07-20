@@ -43,45 +43,46 @@ experiment:
     - path: llm_tasks.rewards.length_penalty
       weight: 0.1
       max_len: 512
-      soft_len: 64
+      penalty_start: 448
 
     - path: llm_tasks.rewards.format_reward
       weight: 0.1
 
   n_samples: 200        # campioni usati per il training
+  group_name_suffix: ""  # parte variabile del group_name WandB, impostata da Claude nel launcher (es. "g8 lr1e-06"), vedi CLAUDE.md
   seed: 42               # seed globale (default: 42)
   num_threads: 8         # torch intraop threads per processo
 
-  num_train_epochs: 1    # passate sull'intero dataset (default: 3.0)
+  num_train_epochs: 3.0  # passate sull'intero dataset (default: 3.0)
   max_steps: -1           # limite assoluto di step, -1 = nessun limite, sovrascrive num_train_epochs (default: -1)
 
-  per_device_train_batch_size: 16  # prompt per step, più alto = più stabile ma più lento (default: 8)
+  per_device_train_batch_size: 8   # prompt per step, più alto = più stabile ma più lento (default: 8)
   gradient_accumulation_steps: 1    # step accumulati prima dell'update, simula batch più grandi (default: 1)
 
-  learning_rate: 1.0e-7   # step size optimizer, più alto converge prima ma rischia instabilità (default: 1e-6)
+  learning_rate: 1.0e-6   # step size optimizer, più alto converge prima ma rischia instabilità (default: 1e-6)
   lr_scheduler_type: linear  # come decade il lr nel tempo (default: linear)
-  warmup_ratio: 0.1        # frazione di step iniziali a lr crescente, stabilizza l'inizio (default: null)
+  warmup_ratio: 0.0        # frazione di step iniziali a lr crescente, stabilizza l'inizio (default: 0.0)
   warmup_steps: 0           # warmup in step assoluti, alternativa a warmup_ratio (default: 0)
 
   optim: adamw_torch_fused  # optimizer per l'update dei pesi (default: adamw_torch_fused)
   weight_decay: 0.0          # regolarizzazione L2 sui pesi (default: 0.0)
-  max_grad_norm: 0.3         # gradient clipping, evita esplosioni del gradiente (default: 1.0)
+  max_grad_norm: 1.0         # gradient clipping, evita esplosioni del gradiente (default: 1.0)
 
-  num_generations: 4       # completion per prompt, più alto = advantage più preciso ma più costo (default: 8)
-  num_iterations: 2         # epoche di update PPO-style sullo stesso batch di generazioni, μ in GRPO (default: 1)
+  num_generations: 8       # completion per prompt, più alto = advantage più preciso ma più costo (default: 8)
+  num_iterations: 1         # epoche di update PPO-style sullo stesso batch di generazioni, μ in GRPO (default: 1)
 
   beta: 0.0      # peso penalità KL, 0 = nessun vincolo sul modello di riferimento, DAPO (default: 0.0)
   epsilon: 0.2          # clipping inferiore del ratio, PPO (default: 0.2)
-  epsilon_high: 0.28     # clipping superiore, Clip-Higher DAPO, favorisce exploration (default: null = usa epsilon)
+  epsilon_high: null     # clipping superiore, Clip-Higher DAPO, favorisce exploration (default: null = usa epsilon)
   delta: null              # clipping a due lati del ratio, INTELLECT-2, null = disattivato (default: null)
 
   loss_type: dapo                   # normalizza la loss sui token attivi, elimina length bias (default: dapo)
   scale_rewards: group               # normalizzazione dei reward: group/batch/none (default: group)
   importance_sampling_level: token   # livello del ratio di importance sampling: token o sequence (default: token)
-  mask_truncated_completions: true   # esclude dalla loss le completion troncate, DAPO (default: false)
+  mask_truncated_completions: false  # esclude dalla loss le completion troncate, DAPO (default: false)
   top_entropy_quantile: 1.0          # allena solo sui token a entropia più alta, 1.0 = tutti (default: 1.0)
 
-  max_completion_length: 128  # token massimi per completion, limita il collo di bottiglia in generazione (default: 256)
+  max_completion_length: 256  # token massimi per completion, limita il collo di bottiglia in generazione (default: 256)
   temperature: 1.0              # temperatura di sampling nella generazione (default: 1.0)
   top_p: 1.0                     # nucleus sampling (default: 1.0)
   top_k: 0                        # top-k sampling, 0 = disattivato (default: 0)
@@ -98,11 +99,21 @@ experiment:
   eval_strategy: 'no'            # quando valutare: no/steps/epoch (default: no)
   eval_steps: null                   # frequenza eval, allineata a logging_steps (default: null)
   per_device_eval_batch_size: 8     # batch size in valutazione (default: 8)
-  num_generations_eval: 2            # completion per prompt in eval, basso per contenere il costo su CPU (default: null = usa num_generations)
+  num_generations_eval: null         # completion per prompt in eval, basso per contenere il costo su CPU (default: null = usa num_generations)
+  eval_n_samples: null                # sottoinsieme del test set usato in eval, null = usa tutto il test set (default: null)
 
-  logging_steps: 5      # frequenza di logging su WandB (default: 10)
+  logging_steps: 10     # frequenza di logging su WandB (default: 10)
   dir_name: /storage/fis1/RT-DeepRL/results
 
   # Riutilizzo di generation event passati (RT-GRPO, vedi docs/rt_grpo_algo.md)
   window_length: 0        # generation event totali per update (corrente + storici). 0 = GRPOTrainer standard di TRL, 1 = RT_GRPOTrainer senza history (stesso algoritmo di 0)
-  is_weight_type: naive    # correzione IS per i dati storici: solo naive implementato, bh richiede window_length-1 copie del modello in RAM
+  is_weight_type: naive    # correzione IS per i dati storici: naive | bh (bh tiene fino a window_length-1 copie congelate del modello in RAM)
+
+  # Finetuning parziale con LoRA (peft) al posto del full finetuning
+  lora:
+    enabled: false        # true = wrappa il modello con peft.LoraConfig invece di allenare tutti i pesi
+    r: 16                  # rango delle matrici di adattamento, più alto = più capacità e RAM (default: 16)
+    alpha: 32               # scala dell'update LoRA (tipicamente 2×r) (default: 32)
+    dropout: 0.05            # dropout sui layer LoRA, regolarizzazione (default: 0.05)
+    target_modules: all-linear  # layer su cui inserire LoRA: all-linear = tutti i linear, o lista esplicita es. [q_proj,k_proj,v_proj,o_proj]
+    bias: none                # bias allenabili: none | all | lora_only (default: none)

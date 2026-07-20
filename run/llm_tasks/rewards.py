@@ -29,20 +29,19 @@ def format_reward(completions, weight=1.0, **_) -> list[float]:
     return rewards
 
 
-def length_penalty(completion_ids, weight=1.0, max_len=512, soft_len=64, **_) -> list[float]:
+def length_penalty(completion_ids, weight=1.0, max_len=512, penalty_start=448, **_) -> list[float]:
     """
     Penalizza le completion troppo lunghe (soft overlong punishment, DAPO eq. 13):
-    0.0 entro il margine di sicurezza, penalità lineare avvicinandosi a max_len,
+    0.0 fino a penalty_start, penalità lineare tra penalty_start e max_len,
     -weight al raggiungimento o superamento di max_len.
     """
-    threshold = max_len - soft_len
     rewards = []
     for ids in completion_ids:
         length = len(ids)
-        if length <= threshold:
+        if length <= penalty_start:
             rewards.append(0.0)
         elif length <= max_len:
-            rewards.append(weight * (threshold - length) / soft_len)
+            rewards.append(weight * (penalty_start - length) / (max_len - penalty_start))
         else:
             rewards.append(-weight)
     return rewards

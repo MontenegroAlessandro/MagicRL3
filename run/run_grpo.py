@@ -11,28 +11,26 @@ import wandb
 
 from hydra.utils import get_method
 from trl import GRPOTrainer, GRPOConfig
+from peft import LoraConfig
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms.rt_grpo import RT_GRPOTrainer
 
 
-# Componenti del nome del gruppo wandb: ogni entry è (etichetta, valore).
-# Modifica/aggiungi/rimuovi voci qui per cambiare cosa compare nel group name.
+# algo_label è strutturale (deriva meccanicamente da window_length/is_weight_type, sempre
+# obbligatori): calcolato qui. La parte variabile del group name (quali parametri distinguono le
+# run di QUESTA campagna, come abbreviarli) è invece editoriale, non meccanica — vedi
+# experiment.group_name_suffix, impostato nel launcher di ogni lancio (CLAUDE.md).
+IS_WEIGHT_LABEL = {"naive": "N", "bh": "BH"}
+
+
 def build_group_name(exp: DictConfig) -> str:
-    rew_label = "+".join(spec.path.rsplit(".", 1)[-1] for spec in exp.reward_fns)
-    algo_label = "GRPO" if exp.window_length < 1 else f"RT-GRPO w={exp.window_length} ({exp.is_weight_type})"
-    parts = [
-        algo_label,
-        f"[{exp.task_name}]",
-        f"rew={rew_label}",
-        f"bs{exp.per_device_train_batch_size}",
-        f"g{exp.num_generations}",
-        f"lr{exp.learning_rate}",
-        f"beta{exp.beta}",
-        f"eps{exp.epsilon}",
-    ]
-    return " ".join(parts)
+    if exp.window_length < 1:
+        algo_label = "GRPO"
+    else:
+        algo_label = f"RT-GRPO-{IS_WEIGHT_LABEL[exp.is_weight_type]} w{exp.window_length}"
+    return f"{algo_label} {exp.group_name_suffix}".strip()
 
 
 def load_reward_fn(spec):
@@ -45,6 +43,19 @@ def load_reward_fn(spec):
     return partial_fn
 
 
+def build_peft_config(exp: DictConfig) -> LoraConfig | None:
+    if not exp.lora.enabled:
+        return None
+    return LoraConfig(
+        task_type="CAUSAL_LM",
+        r=exp.lora.r,
+        lora_alpha=exp.lora.alpha,
+        lora_dropout=exp.lora.dropout,
+        target_modules=exp.lora.target_modules,
+        bias=exp.lora.bias,
+    )
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="conf_grpo")
 def main(cfg: DictConfig):
     exp = cfg.experiment
@@ -53,6 +64,8 @@ def main(cfg: DictConfig):
     task = importlib.import_module(f"llm_tasks.{exp.task_name}")
     reward_fns = [load_reward_fn(spec) for spec in exp.reward_fns]
     train_dataset, eval_dataset = task.make_dataset(exp.n_samples, exp.seed)
+    if exp.eval_n_samples is not None:
+        eval_dataset = eval_dataset.select(range(min(exp.eval_n_samples, len(eval_dataset))))
 
 
     group_name = build_group_name(exp)
@@ -65,7 +78,7 @@ def main(cfg: DictConfig):
         config=conf,
         group=group_name,
         name=run_name,
-        tags=list(cfg.wandb.tags),
+        tags=[*cfg.wandb.tags, exp.task_name],
         notes=cfg.wandb.notes or None,
         mode=cfg.wandb.mode,
         dir=exp.dir_name,
@@ -123,6 +136,8 @@ def main(cfg: DictConfig):
         num_completions_to_print=4,
     )
 
+    peft_config = build_peft_config(exp)
+
     if exp.window_length < 1:
         trainer = GRPOTrainer(
             model=exp.model_name,
@@ -130,6 +145,7 @@ def main(cfg: DictConfig):
             args=grpo_cfg,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            peft_config=peft_config,
         )
     else:
         trainer = RT_GRPOTrainer(
@@ -140,6 +156,7 @@ def main(cfg: DictConfig):
             args=grpo_cfg,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            peft_config=peft_config,
         )
 
     trainer.train()
