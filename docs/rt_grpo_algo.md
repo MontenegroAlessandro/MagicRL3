@@ -7,7 +7,7 @@ a quello corrente prima di ogni update, per ottenere più segnale di gradiente a
 generazione — stessa idea di `RT_PPO`/`MultiRolloutBuffer` applicata a GRPO.
 
 > Implementato in `algorithms/rt_grpo.py` (`RT_GRPOTrainer`) / `buffers/multi_generation_buffer.py`
-> (`MultiGenerationBuffer`). Entrambe le correzioni IS (naive e bh) sono attive.
+> (`MultiGenerationBuffer`). Tutte e tre le correzioni IS (naive, bh, mpm) sono attive.
 
 ## Perché l'advantage non "invecchia" come in PPO
 
@@ -147,11 +147,12 @@ Due decisioni di fondo, prima del codice:
 +
 +    log_window_diagnostics(ratio, mask, inputs["window_id"], ...)
 +    # clip fraction / KL approssimata / |ratio-1| / varianza / ESS, per window_id (0=corrente,
-+    # 1..W-1=storico). Se is_weight_type == "bh", logga ANCHE le stesse metriche sul ratio naive
-+    # "di controllo" (suffisso _bh per distinguerle), per confrontare i due nello stesso run
++    # 1..W-1=storico). Se is_weight_type == "bh" o "mpm", logga ANCHE le stesse metriche sul
++    # ratio naive "di controllo" (l'operativo prende il suffisso _bh/_mpm), per confrontare
++    # i due nello stesso run
 +
 +
-+_compute_ratio(per_token_logps, mask, inputs):              # NUOVO — unico punto esteso per naive/bh,
++_compute_ratio(per_token_logps, mask, inputs):              # NUOVO — unico punto esteso per naive/bh/mpm,
 +                                                               # stesso schema di RT_PPO._compute_ratio
 +
 +    se is_weight_type == "naive":
@@ -165,6 +166,12 @@ Due decisioni di fondo, prima del codice:
 +            # media in log-space (logsumexp) delle log-prob sotto TUTTE le policy della finestra
 +        altrimenti:
 +            old_per_token_logps = ...come naive...       # nessuna history disponibile: bh degenera a naive
++
++    se is_weight_type == "mpm":
++        old_per_token_logps = mpm_effective_old_logps(per_token_logps, inputs["old_per_token_logps"])
++        # log della mistura difensiva (1-λ)·p_θi + λ·p_θ (logsumexp a due termini); p_θ entra
++        # nel denominatore STACCATO dal grafo, come costante comportamentale. Se
++        # old_per_token_logps manca (ratio naive = 1 comunque): degenera a naive
 +
 +    log_ratio = per_token_logps - old_per_token_logps
 +    ratio = exp(riduci(log_ratio, importance_sampling_level))    # token o sequence, come GRPO nativo
@@ -205,6 +212,36 @@ congelate del modello tenute in RAM contemporaneamente — per Qwen2-0.5B in flo
 non KB come in `rt_ppo` (dove la policy è una MLP di poche decine di KB). Un warning all'avvio stampa la
 stima di RAM se `is_weight_type=bh`.
 
+## La correzione mpm (multiple power mean)
+
+Terza correzione IS, dal paper RT-PG (Montenegro et al. 2026, "Reusing Trajectories in Policy
+Gradients Enables Fast Convergence", Sez. 4): il peso PM-corretto del paper,
+`1 / ((1-λ)·p_θi/p_θ + λ)`, si riscrive come ratio contro una densità comportamentale effettiva
+
+    w = p_θ / ((1-λ)·p_θi + λ·p_θ)
+
+cioè una **mistura difensiva** tra la policy che ha generato la riga (p_θi) e quella corrente (p_θ).
+L'implementazione segue quindi lo stesso schema di bh — si sostituisce `old_per_token_logps` con il
+log della mistura, calcolato per-token con un logsumexp a due termini — ma a differenza di bh usa
+solo tensori già presenti nel batch (`old_per_token_logps` salvato nello snapshot e il
+`per_token_logps` del forward corrente, staccato dal grafo): **nessuna copia congelata del modello,
+nessun forward pass extra, nessuna modifica al buffer**. Costo identico a naive.
+
+Proprietà e scelte implementative:
+- **Bound difensivo**: `w <= 1/λ` per costruzione — le righe storiche molto off-policy non possono
+  esplodere, indipendentemente dal clipping PPO a valle (che resta attivo, invariato).
+- **λ fisso** (`mpm_lambda`, default 0.1): il paper propone anche λ e α adattivi da una stima della
+  χ²-divergenza per finestra, ma lo stimatore campionario a livello di sequenza è inaffidabile per
+  gli LLM (exp di somme di log-ratio su centinaia di token) e quello in forma chiusa richiederebbe
+  di nuovo gli snapshot che mpm vuole evitare. Prima versione: λ fisso, α uniformi (impliciti nella
+  media del batch, come l'1/ω della versione teorica del paper). Estremi degeneri: λ=0 → naive,
+  λ=1 → ratio identicamente 1.
+- **Detach sul termine λ·p_θ**: il denominatore è una costante comportamentale (come
+  `old_per_token_logps` negli altri due casi); senza detach il gradiente fluirebbe anche attraverso
+  la mistura, cambiando la semantica del surrogato.
+- **Dati correnti (window_id=0)**: p_θi ≈ p_θ, quindi w ≈ 1 — la correzione è di fatto neutra
+  sull'on-policy, nessuno special-case necessario.
+
 **Nota tecnica (bug corretto, 2026-07-14)**: nella prima versione il buffer aveva `maxlen=W-1` e
 `mix()` iterava su tutta la history — ma il push avviene *prima* del mix, quindi `history[0]` era
 l'evento corrente: ogni batch misto conteneva l'evento corrente **due volte** (window_id 0 e 1), la
@@ -223,7 +260,8 @@ l'intera loss della riga, non solo quella posizione.
 
 ```yaml
 window_length: 0        # generation event totali per update (corrente + storici), 0 = GRPOTrainer standard di TRL
-is_weight_type: naive    # correzione IS per dati storici: naive/bh, bh richiede W-1 copie del modello in RAM
+is_weight_type: naive    # correzione IS per dati storici: naive/bh/mpm (bh richiede W-1 copie del modello in RAM, mpm costa come naive)
+mpm_lambda: 0.1          # λ della correzione power-mean (solo mpm): peso IS limitato da 1/λ; 0 → naive, 1 → ratio sempre 1
 ```
 
 `window_length == 0` istanzia `GRPOTrainer` standard di TRL; `window_length >= 1` istanzia
