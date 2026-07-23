@@ -1,0 +1,49 @@
+wandb:
+  project: rebuttal
+  entity: alessandro-montenegro-polimi
+  sync_tensorboard: true
+  tags: ["HalfCheetah-v5"]
+
+experiment:
+  env_name: HalfCheetah-v5 # diverso da sac_default.yaml 
+  n_envs: 1
+  total_timesteps: 1_000_000
+  dir_name: results
+  render: false
+  normalize_obs: true
+  normalize_reward: false
+
+  # SAC hyperparameters
+  policy_type: MlpPolicy
+  learning_rate: 3e-4
+  buffer_size: 1_000_000
+  learning_starts: 10_000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 1
+  gradient_steps: 1
+  ent_coef: "auto"
+  target_update_interval: 1
+  target_entropy: "auto"
+  optimize_memory_usage: false
+  use_sde: false
+  sde_sample_freq: -1
+  use_sde_at_warmup: false
+
+  # Logging / evaluation
+  stats_window_size: 100
+  eval_freq: 10_000
+  n_eval_episodes: 20
+  verbose: 0
+  seed: 2026
+  device: cpu
+
+  # Policy architecture
+  policy_kwargs:
+    net_arch: [256, 256]
+    activation_fn: relu
+
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

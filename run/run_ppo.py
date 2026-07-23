@@ -15,7 +15,7 @@ import envs
 from buffers.multi_rollout_buffer import MultiRolloutBuffer
 import torch.nn as nn
 
-@hydra.main(version_base=None, config_path=".", config_name="conf")
+@hydra.main(version_base=None, config_path="config", config_name="conf_ppo")
 def main(cfg: DictConfig):
     exp = cfg.experiment
 
@@ -37,6 +37,7 @@ def main(cfg: DictConfig):
             exp.fresh_adv = True # re-evaluates the advantages
             exp.weight_type = "naive" # it uses naive weighting
             exp.geppo_clip = True # it uses a specific way of clipping
+            exp.adaptive_lr = True # Alg. 1: eta adapted from the realized TV estimate
         elif not exp.sequential_window_training and not exp.fresh_adv:
             # base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
             weight = "BH" if exp.weight_type == "bh" else "N"
@@ -57,15 +58,25 @@ def main(cfg: DictConfig):
         # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
     base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} opc={exp.on_policy_critic} eps={exp.clip_range}"
+
+    # GePPO Alg. 1 updates eta recursively with no underlying schedule: the
+    # adaptive scale matches the paper only if the base learning rate is constant.
+    if exp.adaptive_lr and not isinstance(exp.learning_rate, (int, float)):
+        raise ValueError(
+            f"adaptive_lr requires a constant learning_rate, got {exp.learning_rate!r}"
+        )
+
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
     run = wandb.init(
+        entity=cfg.wandb.entity,
         project=cfg.wandb.project,
         config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard,
         group=base_name,
         name=f"{base_name} seed={exp.seed}",
         tags=cfg.wandb.tags,
+        dir=exp.dir_name,
     )
 
     # --- Training env ---
@@ -97,6 +108,9 @@ def main(cfg: DictConfig):
 
     if exp.window_size == 1:
         model = MyPPO(
+            adaptive_lr=exp.adaptive_lr,
+            adaptive_lr_alpha=exp.adaptive_lr_alpha,
+            adaptive_lr_beta=exp.adaptive_lr_beta,
             policy=exp.policy_type,
             env=env,
             learning_rate=exp.learning_rate,
@@ -135,6 +149,9 @@ def main(cfg: DictConfig):
             fresh_adv=exp.fresh_adv,
             on_policy_masking=exp.on_policy_masking,
             geppo_clip=exp.geppo_clip,
+            adaptive_lr=exp.adaptive_lr,
+            adaptive_lr_alpha=exp.adaptive_lr_alpha,
+            adaptive_lr_beta=exp.adaptive_lr_beta,
             # Old PPO args
             policy=exp.policy_type,
             env=env,

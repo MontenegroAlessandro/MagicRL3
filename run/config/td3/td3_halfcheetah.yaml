@@ -1,0 +1,47 @@
+wandb:
+  project: rebuttal
+  entity: alessandro-montenegro-polimi
+  sync_tensorboard: true
+  tags: []
+
+experiment:
+  env_name: HalfCheetah-v5 # diverso da td3_default.yaml
+  n_envs: 1
+  total_timesteps: 1_000_000
+  dir_name: results
+  render: false
+  normalize_obs: true
+  normalize_reward: false
+
+  # TD3 hyperparameters
+  policy_type: MlpPolicy
+  learning_rate: 1e-3  # diverso da td3_default.yaml (3e-4) — tuning zoo per Mujoco
+  buffer_size: 1_000_000
+  learning_starts: 10_000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 1
+  gradient_steps: 1
+  policy_delay: 2
+  target_policy_noise: 0.2
+  target_noise_clip: 0.5
+  action_noise_std: 0.1
+  optimize_memory_usage: false
+
+  # Logging / evaluation
+  stats_window_size: 100
+  eval_freq: 10_000
+  n_eval_episodes: 20
+  verbose: 0
+  seed: 2026
+  device: cpu
+
+  # Policy architecture
+  policy_kwargs:
+    net_arch: [400, 300]  # diverso da td3_default.yaml ([256, 256]) — tuning zoo per Mujoco
+    activation_fn: relu
+
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

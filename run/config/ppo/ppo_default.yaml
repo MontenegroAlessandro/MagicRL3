@@ -1,5 +1,6 @@
 wandb:
-  project: rt-ppo-hc-3
+  project: rebuttal
+  entity: alessandro-montenegro-polimi
   sync_tensorboard: true
   tags: []
 
@@ -48,10 +49,21 @@ experiment:
   n_eval_episodes: 50
   on_policy_masking: false
   geppo_clip: false
+  # Adaptive LR (GePPO Alg. 1): applied as a multiplicative scale on top of the
+  # base SB3 schedule from learning_rate (equivalent to the paper's recursive
+  # eta update only if learning_rate is constant; with a decaying schedule the
+  # effective LR is decay * scale).
+  adaptive_lr: false
+  adaptive_lr_alpha: 0.03
+  adaptive_lr_beta: 0.5
 
   # Reusing Trajectories
   window_size: 1 
   on_policy_critic: true
   weight_type: naive 
-  sequential_window_training: false 
-  fresh_adv: false 
+  sequential_window_training: false
+  fresh_adv: false
+
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

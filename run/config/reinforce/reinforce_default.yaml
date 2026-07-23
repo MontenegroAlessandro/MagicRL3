@@ -1,5 +1,6 @@
 wandb:
-  project: reinforce
+  project: rebuttal
+  entity: alessandro-montenegro-polimi
   sync_tensorboard: true
   tags: []
 
@@ -40,3 +41,7 @@ experiment:
     log_std_init: 0.0
     ortho_init: true
     learn_std: false
+
+hydra:
+  run:
+    dir: ${experiment.dir_name}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
