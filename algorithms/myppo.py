@@ -4,9 +4,30 @@ from gymnasium import spaces
 
 from stable_baselines3 import PPO
 
+from .adaptive_lr import AdaptiveLRScheduler
+
 
 class MyPPO(PPO):
     """PPO wrapper that adds diagnostic logging after training."""
+
+    def __init__(
+        self,
+        adaptive_lr: bool = False,
+        adaptive_lr_alpha: float = 0.03,
+        adaptive_lr_beta: float = 0.5,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.adaptive_lr_scheduler = AdaptiveLRScheduler(adaptive_lr, adaptive_lr_alpha, adaptive_lr_beta, self.learning_rate)
+
+    def _update_learning_rate(self, optimizers) -> None:
+        # Overrides BaseAlgorithm._update_learning_rate. `self` here is
+        # always this MyPPO instance — plain method call, no mixin involved.
+        if self.adaptive_lr_scheduler.enabled:
+            self.adaptive_lr_scheduler.update_learning_rate(self, optimizers)
+        else:
+            super()._update_learning_rate(optimizers)
 
     def train(self) -> None:
         super().train()
@@ -44,4 +65,9 @@ class MyPPO(PPO):
             self.logger.record("diagnostics_ess/final_naive_ess_mean", ess.item())
             self.logger.record("diagnostics_var/final_naive_ratio_var_window_0", all_r.var().item())
             self.logger.record("diagnostics_var/final_naive_ratio_var_mean", all_r.var().item())
+
+        if self.adaptive_lr_scheduler.enabled:
+            mean_abs_ratio = float(np.mean(abs_ratio_vals)) if abs_ratio_vals else 0.0
+            self.adaptive_lr_scheduler.update(mean_abs_ratio, clip_range)
+
         self.policy.set_training_mode(True)

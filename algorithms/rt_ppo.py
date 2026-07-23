@@ -15,6 +15,8 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedul
 from stable_baselines3.common.utils import FloatSchedule, explained_variance
 from stable_baselines3 import PPO
 
+from .adaptive_lr import AdaptiveLRScheduler
+
 IS_WEIGHT_TYPE = Literal["naive", "bh"]
 
 class RT_PPO(PPO):
@@ -27,6 +29,9 @@ class RT_PPO(PPO):
             fresh_adv: bool = False,
             on_policy_masking: bool = False,
             geppo_clip: bool = False,
+            adaptive_lr: bool = False,
+            adaptive_lr_alpha: float = 0.03,
+            adaptive_lr_beta: float = 0.5,
             *args,
             **kwargs,
         ):
@@ -47,6 +52,17 @@ class RT_PPO(PPO):
         self.fresh_adv = fresh_adv
         self.on_policy_masking = on_policy_masking
         self.geppo_clip = geppo_clip
+        self.adaptive_lr_scheduler = AdaptiveLRScheduler(adaptive_lr, adaptive_lr_alpha, adaptive_lr_beta, self.learning_rate)
+
+    def _update_learning_rate(self, optimizers) -> None:
+        # Overrides BaseAlgorithm._update_learning_rate to fold in the
+        # GePPO-style adaptive scale tracked by self.adaptive_lr_scheduler.
+        # `self` here is always this RT_PPO instance: no inheritance from
+        # another class is involved, this is a plain method call.
+        if self.adaptive_lr_scheduler.enabled:
+            self.adaptive_lr_scheduler.update_learning_rate(self, optimizers)
+        else:
+            super()._update_learning_rate(optimizers)
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
         """
@@ -183,8 +199,12 @@ class RT_PPO(PPO):
         # epoch loop we evaluate it on each minibatch to get pi_{theta_k}(a|s),
         # which together with old_log_prob (pi_{theta_{k-i}}(a|s), the policy that
         # actually collected the sample) generalizes the "1" in the clip bounds.
+        # The adaptive LR needs the same snapshot: its TV estimate (Lemma 3)
+        # pairs pi/pi_{k-i} and pi_k/pi_{k-i} on the same (s,a), so both ratios
+        # must be evaluated on the same minibatch (buffer.get() shuffles, so
+        # pairing final vs initial diagnostics passes element-wise would be wrong).
         reference_policy = None
-        if self.geppo_clip:
+        if self.geppo_clip or self.adaptive_lr_scheduler.enabled:
             reference_policy = copy.deepcopy(self.policy)
             reference_policy.set_training_mode(False)
 
@@ -417,6 +437,7 @@ class RT_PPO(PPO):
         abs_ratio_bh_by_window: dict[int, list[float]] = {}
         final_naive_ratios_by_window: dict[int, list[th.Tensor]] = {}
         final_bh_ratios_by_window: dict[int, list[th.Tensor]] = {}
+        ratio_diff_by_window: dict[int, list[th.Tensor]] = {}
         with th.no_grad():
             for rollout_data in self.rollout_buffer.get(batch_size=None, window_id=None):
                 actions = rollout_data.actions
@@ -426,6 +447,11 @@ class RT_PPO(PPO):
                 naive_ratio = th.exp(log_prob - rollout_data.old_log_prob)
                 if use_bh:
                     bh_ratio = self._compute_ratio(log_prob, rollout_data)
+                if self.adaptive_lr_scheduler.enabled:
+                    # |pi/pi_{k-i} - pi_k/pi_{k-i}| on the same samples (Lemma 3)
+                    _, ref_log_prob, _ = reference_policy.evaluate_actions(rollout_data.observations, actions)
+                    ref_ratio = th.exp(ref_log_prob - rollout_data.old_log_prob)
+                    abs_ratio_diff = (naive_ratio - ref_ratio).abs()
                 clipped = (th.abs(naive_ratio - 1) > clip_range).float()
                 wids_in_batch = rollout_data.window_id
                 for w in wids_in_batch.unique():
@@ -436,6 +462,8 @@ class RT_PPO(PPO):
                     kl_by_window.setdefault(w_int, []).append(((w_naive - 1) - th.log(w_naive)).mean().item())  # Schulman approx. reverse KL
                     abs_ratio_by_window.setdefault(w_int, []).append((w_naive - 1).abs().mean().item())
                     final_naive_ratios_by_window.setdefault(w_int, []).append(w_naive.cpu())
+                    if self.adaptive_lr_scheduler.enabled:
+                        ratio_diff_by_window.setdefault(w_int, []).append(abs_ratio_diff[w_mask].cpu())
                     if use_bh:
                         w_bh = bh_ratio[w_mask]
                         kl_bh_by_window.setdefault(w_int, []).append(((w_bh - 1) - th.log(w_bh)).mean().item())
@@ -480,4 +508,14 @@ class RT_PPO(PPO):
                 ess = (all_r.sum() ** 2 / (all_r ** 2).sum()) / len(all_r)
                 self.logger.record(f"diagnostics_ess/{prefix}_ess_mean", ess.item())
                 self.logger.record(f"diagnostics_var/{prefix}_ratio_var_mean", all_r.var().item())
+
+        # --- adaptive learning rate (GePPO Algorithm 1) ---
+        if self.adaptive_lr_scheduler.enabled:
+            # Pooled mean over all samples: the implicit nu matches the training
+            # objective, which mixes windows proportionally to their sample count
+            # (same nu in surrogate and penalty, as required by Theorem 1).
+            all_diffs = [d for parts in ratio_diff_by_window.values() for d in parts]
+            mean_abs_ratio_diff = th.cat(all_diffs).mean().item() if all_diffs else 0.0
+            self.adaptive_lr_scheduler.update(mean_abs_ratio_diff, clip_range)
+
         self.policy.set_training_mode(True)
