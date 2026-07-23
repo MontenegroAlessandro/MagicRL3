@@ -2,7 +2,7 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["Reacher-v5"]
 
 experiment:
   env_name: Reacher-v5 # diverso da td3_default.yaml

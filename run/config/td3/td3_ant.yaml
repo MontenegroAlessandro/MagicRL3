@@ -2,20 +2,20 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: ["Hopper-v5"]
+  tags: ["Ant-v5"]
 
 experiment:
-  env_name: Hopper-v5  # diverso da sac_default.yaml 
+  env_name: Ant-v5 # diverso da td3_default.yaml
   n_envs: 1
-  total_timesteps: 1_000_000
+  total_timesteps: 3_000_000
   dir_name: results
   render: false
   normalize_obs: true
   normalize_reward: false
 
-  # SAC hyperparameters
+  # TD3 hyperparameters
   policy_type: MlpPolicy
-  learning_rate: 3e-4
+  learning_rate: 1e-3  # diverso da td3_default.yaml (3e-4) — tuning zoo per Mujoco
   buffer_size: 1_000_000
   learning_starts: 10_000
   batch_size: 256
@@ -23,13 +23,11 @@ experiment:
   gamma: 0.99
   train_freq: 1
   gradient_steps: 1
-  ent_coef: "auto"
-  target_update_interval: 1
-  target_entropy: "auto"
+  policy_delay: 2
+  target_policy_noise: 0.2
+  target_noise_clip: 0.5
+  action_noise_std: 0.1
   optimize_memory_usage: false
-  use_sde: false
-  sde_sample_freq: -1
-  use_sde_at_warmup: false
 
   # Logging / evaluation
   stats_window_size: 100
@@ -41,7 +39,7 @@ experiment:
 
   # Policy architecture
   policy_kwargs:
-    net_arch: [256, 256]
+    net_arch: [400, 300]  # diverso da td3_default.yaml ([256, 256]) — tuning zoo per Mujoco
     activation_fn: relu
 
 hydra:

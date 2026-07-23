@@ -2,12 +2,12 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: ["Hopper-v5"]
+  tags: ["Ant-v5"]
 
 experiment:
-  env_name: Hopper-v5  # diverso da sac_default.yaml 
+  env_name: Ant-v5 # diverso da sac_default.yaml
   n_envs: 1
-  total_timesteps: 1_000_000
+  total_timesteps: 3_000_000
   dir_name: results
   render: false
   normalize_obs: true

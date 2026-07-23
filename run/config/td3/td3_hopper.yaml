@@ -2,7 +2,7 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["Hopper-v5"]
 
 experiment:
   env_name: Hopper-v5 # diverso da td3_default.yaml
