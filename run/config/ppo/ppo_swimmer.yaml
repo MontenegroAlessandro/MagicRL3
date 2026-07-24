@@ -2,27 +2,27 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["Swimmer-v5"]
 
 experiment:
   # ENV
-  env_name: HalfCheetah-v5
-  n_envs: 1
+  env_name: Swimmer-v5         # differs from default (HalfCheetah-v5)
+  n_envs: 4                    # differs from default (1)
   total_timesteps: 1e6
   dir_name: results
   render: false
   normalize_obs: true
   normalize_reward: false
 
-  # PPO Parameters (SB3 default values)
+  # PPO Parameters (tuned config from the paper, Table 2)
   policy_type: MlpPolicy
-  learning_rate: 3e-4
-  n_steps: 2048
-  batch_size: 64               # 2048 / 32 = 64 -> SB3 default batch_size
+  learning_rate: 6e-4          # differs from default (3e-4)
+  n_steps: 1024                # differs from default (2048)
+  batch_size: 256              # differs from default (64)
   n_minibatches: null
   n_epochs: 10
-  gamma: 0.99
-  gae_lambda: 0.95
+  gamma: 0.9999                # differs from default (0.99)
+  gae_lambda: 0.98             # differs from default (0.95)
   clip_range: 0.2
   clip_range_vf: null
   normalize_advantage: true

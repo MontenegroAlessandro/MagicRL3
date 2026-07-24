@@ -2,11 +2,11 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["Reacher-v5"]
 
 experiment:
   # ENV
-  env_name: HalfCheetah-v5
+  env_name: Reacher-v5         # differs from default (HalfCheetah-v5)
   n_envs: 1
   total_timesteps: 1e6
   dir_name: results
@@ -14,21 +14,21 @@ experiment:
   normalize_obs: true
   normalize_reward: false
 
-  # PPO Parameters (SB3 default values)
+  # PPO Parameters (tuned config from the paper, Table 2)
   policy_type: MlpPolicy
-  learning_rate: 3e-4
-  n_steps: 2048
-  batch_size: 64               # 2048 / 32 = 64 -> SB3 default batch_size
+  learning_rate: 1.04e-4       # differs from default (3e-4)
+  n_steps: 512                 # differs from default (2048)
+  batch_size: 32               # differs from default (64)
   n_minibatches: null
-  n_epochs: 10
-  gamma: 0.99
-  gae_lambda: 0.95
-  clip_range: 0.2
+  n_epochs: 5                  # differs from default (10)
+  gamma: 0.9                   # differs from default (0.99)
+  gae_lambda: 1.0              # differs from default (0.95)
+  clip_range: 0.3              # differs from default (0.2)
   clip_range_vf: null
   normalize_advantage: true
-  ent_coef: 0.0
-  vf_coef: 0.5
-  max_grad_norm: 0.5
+  ent_coef: 7.53e-8            # differs from default (0.0)
+  vf_coef: 0.950               # differs from default (0.5)
+  max_grad_norm: 0.9           # differs from default (0.5)
   use_sde: false
   sde_sample_freq: -1
   rollout_buffer_class: null

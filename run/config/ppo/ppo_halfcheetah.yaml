@@ -2,7 +2,7 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["HalfCheetah-v5"]
 
 experiment:
   # ENV
@@ -14,21 +14,21 @@ experiment:
   normalize_obs: true
   normalize_reward: false
 
-  # PPO Parameters (SB3 default values)
+  # PPO Parameters (tuned config from the paper, Table 2)
   policy_type: MlpPolicy
-  learning_rate: 3e-4
-  n_steps: 2048
-  batch_size: 64               # 2048 / 32 = 64 -> SB3 default batch_size
+  learning_rate: 2.06e-5       # differs from default (3e-4)
+  n_steps: 512                 # differs from default (2048)
+  batch_size: 64
   n_minibatches: null
-  n_epochs: 10
-  gamma: 0.99
-  gae_lambda: 0.95
-  clip_range: 0.2
+  n_epochs: 20                 # differs from default (10)
+  gamma: 0.98                  # differs from default (0.99)
+  gae_lambda: 0.92             # differs from default (0.95)
+  clip_range: 0.1              # differs from default (0.2)
   clip_range_vf: null
   normalize_advantage: true
-  ent_coef: 0.0
-  vf_coef: 0.5
-  max_grad_norm: 0.5
+  ent_coef: 4.02e-4            # differs from default (0.0)
+  vf_coef: 0.581               # differs from default (0.5)
+  max_grad_norm: 0.8           # differs from default (0.5)
   use_sde: false
   sde_sample_freq: -1
   rollout_buffer_class: null
@@ -37,9 +37,9 @@ experiment:
   stats_window_size: 100
   tensorboard_log: null
   policy_kwargs:
-    log_std_init: 0.0
-    net_arch: [64, 64]
-    ortho_init: true
+    log_std_init: -2.0         # differs from default (0.0)
+    net_arch: [256, 256]       # differs from default ([64, 64])
+    ortho_init: false          # differs from default (true)
     activation_fn: tanh
 
   # Logging / evaluation

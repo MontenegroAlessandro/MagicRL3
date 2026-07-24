@@ -2,11 +2,11 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: []
+  tags: ["Hopper-v5"]
 
 experiment:
   # ENV
-  env_name: HalfCheetah-v5
+  env_name: Hopper-v5          # differs from default (HalfCheetah-v5)
   n_envs: 1
   total_timesteps: 1e6
   dir_name: results
@@ -14,14 +14,15 @@ experiment:
   normalize_obs: true
   normalize_reward: false
 
-  # PPO Parameters (SB3 default values)
+  # PPO Parameters (config from the paper, Table 2 - for Hopper-v5 hand-picked,
+  # not taken from RL Zoo: it matches the SB3 defaults except for gamma)
   policy_type: MlpPolicy
   learning_rate: 3e-4
   n_steps: 2048
-  batch_size: 64               # 2048 / 32 = 64 -> SB3 default batch_size
+  batch_size: 64
   n_minibatches: null
   n_epochs: 10
-  gamma: 0.99
+  gamma: 0.999                 # differs from default (0.99)
   gae_lambda: 0.95
   clip_range: 0.2
   clip_range_vf: null
