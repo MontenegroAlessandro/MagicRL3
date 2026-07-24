@@ -164,6 +164,7 @@ class MultiRolloutBuffer(RolloutBuffer):
         actions = self._combined_tensors["actions"]
         old_log_probs = self._combined_tensors["log_probs"].flatten()
         rewards = self._combined_tensors["rewards"].flatten()
+        episode_starts = self._combined_tensors["episode_starts"].flatten()
 
         obs_t = th.as_tensor(obs).to(policy.device)
         actions_t = th.as_tensor(actions).to(policy.device)
@@ -185,14 +186,18 @@ class MultiRolloutBuffer(RolloutBuffer):
         rho = rho_bar.reshape(n_rollouts, m, n)
         V = fresh_values.reshape(n_rollouts, m, n)
         R = rewards.reshape(n_rollouts, m, n)
+        # episode_starts[t] == 1 marca il PRIMO passo di un nuovo episodio: serve a
+        # mascherare il bootstrap attraverso i confini di episodio dentro il rollout.
+        ep_starts = episode_starts.reshape(n_rollouts, m, n)
 
         # Backward pass — GAE with V-TRACE IS correction (matches reference gae_vtrace).
         #
-        # Advantage:    A_t = δ'_t + γλ · c_{t+1} · A_{t+1}
+        # Advantage:    A_t = δ'_t + γλ · non_term_{t+1} · c_{t+1} · A_{t+1}
         # Value target: v_t = c_t · A_t + V(s_t)           (≡ rtg = adv * ratio_trunc + V)
         #
-        # where δ'_t = r_t + γ V(s_{t+1}) - V(s_t)  (raw TD error, no IS weight on first term)
-        # and   c_t  = min(1, π_k(a_t|s_t) / π_behavioral(a_t|s_t))
+        # where δ'_t = r_t + γ · non_term_{t+1} · V(s_{t+1}) - V(s_t)  (raw TD error, no IS weight on first term)
+        #       c_t  = min(1, π_k(a_t|s_t) / π_behavioral(a_t|s_t))
+        #       non_term_{t+1} = 1 - episode_starts[t+1]  (0 se t è terminale -> niente bootstrap)
         v_trace = np.zeros_like(V)
         adv = np.zeros_like(V)
 
@@ -201,8 +206,13 @@ class MultiRolloutBuffer(RolloutBuffer):
         c_next = np.zeros((n_rollouts, m))   # c_T    = 0  (boundary)
 
         for t in reversed(range(n)):
-            delta_t = R[:, :, t] + self.gamma * V_next - V[:, :, t]
-            adv[:, :, t] = delta_t + self.gamma * self.gae_lambda * c_next * A_next
+            if t == n - 1:
+                non_term = np.zeros((n_rollouts, m))      # confine di rollout: V(s_T)=0, come prima
+            else:
+                non_term = 1.0 - ep_starts[:, :, t + 1]   # 0 se t era terminale -> niente bootstrap
+
+            delta_t = R[:, :, t] + self.gamma * non_term * V_next - V[:, :, t]
+            adv[:, :, t] = delta_t + self.gamma * self.gae_lambda * non_term * c_next * A_next
             v_trace[:, :, t] = rho[:, :, t] * adv[:, :, t] + V[:, :, t]
             c_next = rho[:, :, t]
             A_next = adv[:, :, t]
@@ -221,6 +231,7 @@ class MultiRolloutBuffer(RolloutBuffer):
                 "log_probs": self.log_probs.copy(),
                 "advantages": self.advantages.copy(),
                 "returns": self.returns.copy(),
+                "episode_starts": self.episode_starts.copy(),
             }
             if self.use_bh:
                 entry["policy"] = self._current_policy
@@ -272,7 +283,7 @@ class MultiRolloutBuffer(RolloutBuffer):
 
         assert self.full, "Rollout buffer must be full before sampling from it"
 
-        _tensor_names = ["observations", "actions", "rewards", "values", "log_probs", "advantages", "returns"]
+        _tensor_names = ["observations", "actions", "rewards", "values", "log_probs", "advantages", "returns", "episode_starts"]
 
         if not self.generator_ready:
             # Flatten current buffer arrays
