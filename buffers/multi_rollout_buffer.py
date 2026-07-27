@@ -355,8 +355,6 @@ class MultiRolloutBuffer(RolloutBuffer):
             batch = np.random.permutation(batch)  # shuffle within minibatch
             yield self._get_combined_samples(batch)
 
-
-
     def _get_combined_samples(self, batch_inds: np.ndarray) -> RTRolloutBufferSamples:
         data = (
             self._combined_tensors["observations"][batch_inds],

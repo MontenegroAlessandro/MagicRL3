@@ -60,6 +60,7 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         gamma: float,
         max_grad_norm: float,
         use_sde: bool = False,
+        collect_deterministic_rollouts: bool = False,
         sde_sample_freq: int = -1,
         rollout_buffer_class: Optional[type[TrajectoryBuffer]] = None,
         rollout_buffer_kwargs: Optional[dict[str, Any]] = None,
@@ -95,6 +96,7 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.rollout_buffer_class = rollout_buffer_class
         self.rollout_buffer_kwargs = rollout_buffer_kwargs or {}
+        self.collect_deterministic_rollouts = collect_deterministic_rollouts
 
         if _init_setup_model:
             self._setup_model()
@@ -183,7 +185,7 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
 
             with th.no_grad():
                 obs_tensor = obs_as_tensor(self._last_obs, self.device)  # type: ignore[arg-type]
-                actions, _ = self.policy(obs_tensor)
+                actions, _ = self.policy(obs_tensor, deterministic=self.collect_deterministic_rollouts)
             actions = actions.cpu().numpy()
 
             clipped_actions = actions
