@@ -28,6 +28,9 @@ def main(cfg: DictConfig):
         batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
         n_minibatch_effective = exp.n_minibatch
 
+    if exp.fresh_adv:
+        exp.on_policy_critic = False
+
     # logger
     if exp.window_size > 1:
         if exp.weight_type == "geppo":
@@ -58,13 +61,6 @@ def main(cfg: DictConfig):
         # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
     base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} opc={exp.on_policy_critic} eps={exp.clip_range}"
-
-    # GePPO Alg. 1 updates eta recursively with no underlying schedule: the
-    # adaptive scale matches the paper only if the base learning rate is constant.
-    if exp.adaptive_lr and not isinstance(exp.learning_rate, (int, float)):
-        raise ValueError(
-            f"adaptive_lr requires a constant learning_rate, got {exp.learning_rate!r}"
-        )
 
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
@@ -142,7 +138,7 @@ def main(cfg: DictConfig):
             rollout_buffer_kwargs=dict(
                 window_size=exp.window_size,
                 use_bh=(exp.weight_type == "bh"),
-                balanced_batches=exp.balanced_batches
+                batch_sampling=exp.batch_sampling
             ),
             is_weight_type=exp.weight_type,
             sequential_window_training=exp.sequential_window_training,

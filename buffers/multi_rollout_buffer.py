@@ -33,15 +33,19 @@ class RTRolloutBufferSamples(NamedTuple):
     
 
 class MultiRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, window_size=1, use_bh: bool = False, balanced_batches: bool = False, **kwargs):
+    def __init__(self, *args, window_size=1, use_bh: bool = False, batch_sampling: str = "random", **kwargs):
         """
         window_size = 1 means standard PPO buffer.
         window_size > 1 means we will keep data from the past `window_size-1` iterations.
         """
+        if batch_sampling not in ("random", "balanced", "weighted"):
+            raise ValueError(f"batch_sampling must be one of 'random', 'balanced', 'weighted', got '{batch_sampling}'")
+        if batch_sampling == "weighted":
+            raise NotImplementedError("batch_sampling='weighted' is not implemented yet")
         self.window_length = window_size
         self.history = deque(maxlen=max(0, window_size - 1))
         self.use_bh = use_bh and window_size > 1
-        self.balanced_batches = balanced_batches and window_size > 1
+        self.batch_sampling = batch_sampling
         self._combined_tensors = {}
 
         # super class init
@@ -364,7 +368,8 @@ class MultiRolloutBuffer(RolloutBuffer):
         n_windows = 1 + len(self.history) if self.window_length > 1 else 1
 
         # fallback
-        if (not self.balanced_batches
+        if (self.batch_sampling != "balanced"
+                or self.window_length == 1
                 or window_id is not None
                 or n_windows == 1
                 or batch_size is None):

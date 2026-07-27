@@ -2,7 +2,7 @@ wandb:
   project: rebuttal
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
-  tags: ["Reacher-v5"]
+  tags: []
 
 experiment:
   # ENV
@@ -55,7 +55,7 @@ experiment:
   weight_type: naive
   sequential_window_training: false
   fresh_adv: false
-  balanced_batches: false
+  batch_sampling: balanced
   on_policy_masking: false
   geppo_clip: false
 
