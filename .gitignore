@@ -4,6 +4,7 @@ results/
 wandb/
 outputs/
 multirun/
+plots/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -192,3 +193,4 @@ cython_debug/
 .cursorindexingignore
 
 launchers/
+STATUS_EXP.md
