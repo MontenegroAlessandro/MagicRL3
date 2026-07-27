@@ -152,74 +152,105 @@ class MultiRolloutBuffer(RolloutBuffer):
 
     def recompute_advantages(self, policy) -> None:
         """
-        When this method is called, then we recompute the advantage estimates fro the data in the window.
-        This is achieved by employing VTRACE (with trunctation hard-coded to 1.0 for simplicity).
-        Notice that this procedure will be done also for the on-policy data, since they where computed via GAE if the
-        flag for activating this method is set to False.
-        Notice that the return estimates too will no longer be stale and can in principle be used to fit the critic.
+        Recompute the advantage/return estimates for the HISTORICAL windows in the buffer under the
+        current critic, using VTRACE (truncation hard-coded to 1.0 for simplicity), as in IMPALA/GePPO.
+
+        The current (most recent) rollout is left untouched: it was collected with this exact policy and
+        compute_returns_and_advantage() already bootstrapped it correctly (no update has happened since),
+        so its stock GAE advantages/returns are already fresh under the current critic — nothing to redo.
         """
         assert self.generator_ready, "Call get() first to build _combined_tensors"
+
+        n_hist = len(self.history)
+        if n_hist == 0:
+            return  # only the (already-fresh) current rollout is in the buffer, nothing stale to fix
+
+        n = self.buffer_size   # n_steps per rollout
+        m = self.n_envs
+        n_rollouts = n_hist + 1
+        current_size = n * m
 
         obs = self._combined_tensors["observations"]
         actions = self._combined_tensors["actions"]
         old_log_probs = self._combined_tensors["log_probs"].flatten()
-        rewards = self._combined_tensors["rewards"].flatten()
-        episode_starts = self._combined_tensors["episode_starts"].flatten()
+        rewards = self._combined_tensors["rewards"].flatten().reshape(n_rollouts, m, n)
+        # episode_starts[t] == 1 marca il PRIMO passo di un nuovo episodio: serve a mascherare il
+        # bootstrap attraverso i confini di episodio dentro il rollout. episode_starts[0] di un rollout
+        # coincide sempre col done dell'ultimo passo del rollout precedente (self._last_episode_starts
+        # viene riportato, invariato, da una collect_rollouts alla successiva), quindi questo campo,
+        # già presente per ogni rollout in buffer, basta a rilevare le vere terminazioni anche ai confini
+        # TRA rollout, senza bisogno di dati dall'esterno del buffer.
+        ep_starts = self._combined_tensors["episode_starts"].flatten().reshape(n_rollouts, m, n)
+        values = self._combined_tensors["values"].flatten().reshape(n_rollouts, m, n)
+        advantages = self._combined_tensors["advantages"].reshape(n_rollouts, m, n)
+        returns = self._combined_tensors["returns"].reshape(n_rollouts, m, n)
 
-        obs_t = th.as_tensor(obs).to(policy.device)
-        actions_t = th.as_tensor(actions).to(policy.device)
+        # Only the historical windows need to be re-evaluated under the current critic.
+        obs_hist = obs[current_size:]
+        actions_hist = actions[current_size:]
+        old_log_probs_hist = old_log_probs[current_size:]
 
+        obs_t = th.as_tensor(obs_hist).to(policy.device)
+        actions_t = th.as_tensor(actions_hist).to(policy.device)
+
+        was_training = policy.training
+        policy.set_training_mode(False)
         with th.no_grad():
             fresh_values_t, new_log_prob_t, _ = policy.evaluate_actions(obs_t, actions_t)
+        policy.set_training_mode(was_training)
 
-        fresh_values = fresh_values_t.cpu().numpy().flatten()
-        new_log_probs = new_log_prob_t.cpu().numpy().flatten()
+        V_hist = fresh_values_t.cpu().numpy().flatten().reshape(n_hist, m, n)
+        new_log_probs_hist = new_log_prob_t.cpu().numpy().flatten()
 
         # V-TRACE IS ratios clipped to 1.0: rho_bar_t = min(1, pi_current / pi_behavioral)
-        rho_bar = np.minimum(1.0, np.exp(new_log_probs - old_log_probs))
+        rho_hist = np.minimum(1.0, np.exp(new_log_probs_hist - old_log_probs_hist)).reshape(n_hist, m, n)
 
-        n = self.buffer_size   # n_steps per rollout
-        m = self.n_envs
-        n_rollouts = obs.shape[0] // (n * m)
+        R_hist = rewards[1:]
+        ep_hist = ep_starts[1:]
 
-        # Reshape to (n_rollouts, n_envs, n_steps); each rollout chunk is [env0_steps, env1_steps, ...]
-        rho = rho_bar.reshape(n_rollouts, m, n)
-        V = fresh_values.reshape(n_rollouts, m, n)
-        R = rewards.reshape(n_rollouts, m, n)
-        # episode_starts[t] == 1 marca il PRIMO passo di un nuovo episodio: serve a
-        # mascherare il bootstrap attraverso i confini di episodio dentro il rollout.
-        ep_starts = episode_starts.reshape(n_rollouts, m, n)
+        # Bootstrap for each historical window's last step: the value/episode_start at the FIRST step of
+        # its chronologically more-recent neighbor (window 0 = current rollout, for the newest historical
+        # window; the preceding historical window otherwise) — both already available (see comments
+        # above): window 0's values are already fresh, and episode_starts already encodes whether that
+        # boundary transition was a real termination.
+        neighbor_V = np.concatenate([values[0:1, :, 0], V_hist[:-1, :, 0]], axis=0)       # (n_hist, m)
+        neighbor_ep = np.concatenate([ep_starts[0:1, :, 0], ep_hist[:-1, :, 0]], axis=0)  # (n_hist, m)
 
-        # Backward pass — GAE with V-TRACE IS correction (matches reference gae_vtrace).
+        # Backward pass — GAE with V-TRACE IS correction (matches reference gae_vtrace), vectorized across
+        # all historical windows and envs at once.
         #
         # Advantage:    A_t = δ'_t + γλ · non_term_{t+1} · c_{t+1} · A_{t+1}
         # Value target: v_t = c_t · A_t + V(s_t)           (≡ rtg = adv * ratio_trunc + V)
         #
         # where δ'_t = r_t + γ · non_term_{t+1} · V(s_{t+1}) - V(s_t)  (raw TD error, no IS weight on first term)
         #       c_t  = min(1, π_k(a_t|s_t) / π_behavioral(a_t|s_t))
-        #       non_term_{t+1} = 1 - episode_starts[t+1]  (0 se t è terminale -> niente bootstrap)
-        v_trace = np.zeros_like(V)
-        adv = np.zeros_like(V)
+        #       non_term_{t+1} = 1 - episode_starts[t+1]  (0 se t era terminale -> niente bootstrap)
+        #
+        # The trace runs continuously across window boundaries (the env trajectory is continuous there
+        # too, it's just chunked for storage) instead of resetting to zero at every chunk edge; only real
+        # episode terminations, tracked via episode_starts exactly as within a single rollout, cut it.
+        adv_hist = np.zeros_like(V_hist)
+        v_trace_hist = np.zeros_like(V_hist)
 
-        V_next = np.zeros((n_rollouts, m))   # V(s_T) = 0  (bootstrap)
-        A_next = np.zeros((n_rollouts, m))   # A_T    = 0  (no future steps)
-        c_next = np.zeros((n_rollouts, m))   # c_T    = 0  (boundary)
+        V_next = neighbor_V
+        A_next = np.zeros((n_hist, m), dtype=np.float32)
+        c_next = np.zeros((n_hist, m), dtype=np.float32)
 
         for t in reversed(range(n)):
-            if t == n - 1:
-                non_term = np.zeros((n_rollouts, m))      # confine di rollout: V(s_T)=0, come prima
-            else:
-                non_term = 1.0 - ep_starts[:, :, t + 1]   # 0 se t era terminale -> niente bootstrap
+            non_term = (1.0 - neighbor_ep) if t == n - 1 else (1.0 - ep_hist[:, :, t + 1])
 
-            delta_t = R[:, :, t] + self.gamma * non_term * V_next - V[:, :, t]
-            adv[:, :, t] = delta_t + self.gamma * self.gae_lambda * non_term * c_next * A_next
-            v_trace[:, :, t] = rho[:, :, t] * adv[:, :, t] + V[:, :, t]
-            c_next = rho[:, :, t]
-            A_next = adv[:, :, t]
-            V_next = V[:, :, t]
+            delta_t = R_hist[:, :, t] + self.gamma * non_term * V_next - V_hist[:, :, t]
+            adv_hist[:, :, t] = delta_t + self.gamma * self.gae_lambda * non_term * c_next * A_next
+            v_trace_hist[:, :, t] = rho_hist[:, :, t] * adv_hist[:, :, t] + V_hist[:, :, t]
+            c_next = rho_hist[:, :, t]
+            A_next = adv_hist[:, :, t]
+            V_next = V_hist[:, :, t]
 
-        self._combined_tensors["advantages"] = adv.reshape(-1, 1)
-        self._combined_tensors["returns"] = v_trace.reshape(-1, 1)
+        final_advantages = np.concatenate([advantages[:1], adv_hist], axis=0)
+        final_returns = np.concatenate([returns[:1], v_trace_hist], axis=0)
+
+        self._combined_tensors["advantages"] = final_advantages.reshape(-1, 1)
+        self._combined_tensors["returns"] = final_returns.reshape(-1, 1)
     
     def reset(self) -> None:
         if self.full and self.window_length > 1:
