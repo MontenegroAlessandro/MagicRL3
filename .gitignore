@@ -4,7 +4,8 @@ results/
 wandb/
 outputs/
 multirun/
-plots/
+# il toolkit dei grafici e' versionato; restano fuori solo le figure generate
+plots/output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

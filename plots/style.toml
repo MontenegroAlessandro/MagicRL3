@@ -1,0 +1,141 @@
+#  ┌──────────────────────────────────────────────────────────────────────────┐
+#  │  Regole dei grafici — si modifica a mano, non lo riscrive nessuno script  │
+#  └──────────────────────────────────────────────────────────────────────────┘
+#
+#  Vale sia per l'anteprima del selettore sia per l'export .tex: quello che vedi
+#  è quello che scarichi. Il file viene riletto a ogni figura, quindi basta
+#  salvare e ridisegnare — niente riavvii.
+#
+#  Le stringhe fra apici singoli sono letterali: i backslash di LaTeX si scrivono
+#  come sono ('$\omega$', non '$\\omega$'). Fra apici doppi invece vanno raddoppiati.
+#
+#  Una riga cancellata torna al default del codice: qui sotto ci sono i default
+#  attuali scritti per esteso, così si vede cosa c'è da toccare.
+
+
+# ── Figura ────────────────────────────────────────────────────────────────────
+[figure]
+panel_size = [3.1, 2.3]      # pollici, per pannello (larghezza, altezza)
+xlabel = 'Environment Steps ($\times 10^6$)'
+ylabel = 'Mean Return'       # "" = quella della metrica scelta nel selettore
+xscale = 1e6                 # divisore dell'asse x (1e6 = milioni di step)
+share = "row"                # none | row | col | all: quali pannelli condividono la y
+font_scale = 1.0             # moltiplica tutte le dimensioni dei font
+
+
+# ── Curve ─────────────────────────────────────────────────────────────────────
+[lines]
+width = 1.4                  # spessore di default (le regole [[series]] lo sovrascrivono)
+band_alpha = 0.18            # opacità della banda sui seed
+band = "se"                  # se | std | ci95 | iqr | minmax | none
+smooth = 5                   # finestra della media mobile, 0 = curve grezze
+baseline_color = "#000000"   # PPO/SAC/TD3: nel paper sono sempre nere
+baseline_width = 1.6
+
+
+# ── Legenda ───────────────────────────────────────────────────────────────────
+[legend]
+where = "panel"              # panel (in ogni pannello) | first | figure | none
+loc = "best"                 # best | lower right | upper left | ...
+ncol = 1
+frame = true
+font_size = 8.5
+
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+# Usata per le serie che nessuna regola [[series]] colora, nell'ordine scritto.
+[palette]
+colors = [
+  "#648FFF",   # blu     IBM colorblind-safe
+  "#FE6100",   # arancio
+  "#DC267F",   # magenta
+  "#785EF0",   # viola
+  "#FFB000",   # oro
+]
+
+
+# ── Serie ─────────────────────────────────────────────────────────────────────
+#  Una regola per blocco [[series]]. `match` elenca i valori che la serie deve
+#  avere: si applica la PRIMA regola che combacia, quindi le più specifiche vanno
+#  in alto. Le chiavi di `match` sono le colonne dell'indice — le stesse dei
+#  filtri del selettore: family, is_type, window, setting, opc, fresh_adv,
+#  adaptive_lr, sampling, env, epoch_mult, seq.
+#
+#  Ogni regola può fissare:
+#    color        colore della curva e della banda
+#    width        spessore (default: [lines].width)
+#    style        solid | dashed | dotted | dashdot
+#    band_alpha   opacità della banda solo per questa serie
+#    name         nome in legenda nell'anteprima (mathtext di matplotlib)
+#    latex        nome in legenda nel .tex — qui ci vanno le macro del paper
+#
+#  `name` e `latex` sostituiscono solo la parte iniziale dell'etichetta (il nome
+#  dell'algoritmo): quello che varia fra i pannelli (ω, setting, ...) resta
+#  attaccato dopo, come adesso.
+
+[[series]]
+match = { family = "GePPO" }
+color = "#FFB000"
+style = "solid"
+name  = 'GePPO'
+latex = '\geppo'
+
+[[series]]
+match = { family = "RT-PPO", is_type = "N" }
+color = "#DC267F"
+style = "solid"
+name  = 'ωPPO-U'
+latex = '\uppo'
+
+[[series]]
+match = { family = "RT-PPO", is_type = "BH" }
+color = "#648FFF"
+style = "solid"
+name  = 'ωPPO-BH'
+latex = '\bhppo'
+
+[[series]]
+match = { family = "PPO" }
+color = "#000000"
+style = "solid"
+name  = 'PPO'
+latex = '\ppo'
+
+[[series]]
+match = { family = "SAC" }
+color = "#785EF0"
+name  = 'SAC'
+latex = '\sac'
+
+[[series]]
+match = { family = "TD3" }
+color = "#FE6100"
+name  = 'TD3'
+latex = '\tdthree'
+
+
+# ── Solo nel .tex ─────────────────────────────────────────────────────────────
+#  Roba che matplotlib non sa esprimere e che quindi non si vede nell'anteprima.
+[latex]
+# Righe aggiunte dentro \begin{axis}[...] di ogni pannello, in coda alle opzioni
+# scritte da tikzplotlib (le sovrascrivono, perché vengono dopo).
+axis_options = [
+  # 'width=\figurewidth',
+  # 'height=\figureheight',
+  # 'legend style={at={(0.97,0.03)},anchor=south east,draw=lightgray204}',
+  # 'ymin=-11, ymax=-3.5',
+]
+
+# Commento di intestazione dei .tex generati: ricorda cosa serve nel preambolo.
+preamble = '\usepackage{pgfplots,amsmath}  \pgfplotsset{compat=1.18}'
+
+# Macro da definire nel documento perché i nomi `latex` qui sopra funzionino.
+# Sono un promemoria: finiscono come commento in cima a ogni .tex esportato.
+macros = [
+  '\newcommand{\ppo}{\mathtt{PPO}}',
+  '\newcommand{\geppo}{\mathtt{GePPO}}',
+  '\newcommand{\uppo}{\omega\mathtt{PPO\text{-}U}}',
+  '\newcommand{\bhppo}{\omega\mathtt{PPO\text{-}BH}}',
+  '\newcommand{\sac}{\mathtt{SAC}}',
+  '\newcommand{\tdthree}{\mathtt{TD3}}',
+]

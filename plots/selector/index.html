@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RT-DeepRL · selettore run</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <header>
+      <h1>Selettore run</h1>
+      <p class="hint">Nessuna casella selezionata = dimensione non filtrata.</p>
+    </header>
+    <div id="dimensions"></div>
+    <section class="dim">
+      <h2>Seed</h2>
+      <div class="seed-row">
+        <label>da <input type="number" id="seed-min" min="1" step="1"></label>
+        <label>a <input type="number" id="seed-max" min="1" step="1"></label>
+      </div>
+    </section>
+    <button id="reset" class="ghost">Azzera filtri</button>
+  </aside>
+
+  <main>
+    <div id="summary">
+      <div class="stat"><span id="n-runs">–</span><label>run</label></div>
+      <div class="stat"><span id="n-configs">–</span><label>configurazioni</label></div>
+      <div id="states"></div>
+      <div class="actions">
+        <input type="text" id="save-name" placeholder="nome della selezione" maxlength="60">
+        <button id="save" class="primary">Salva</button>
+        <button id="copy" class="ghost">Copia filtri</button>
+      </div>
+    </div>
+    <div id="toast" class="toast"></div>
+
+    <section class="card" id="sel-card">
+      <div class="card-head">
+        <button id="sel-toggle" class="head-toggle" aria-expanded="true">
+          <span class="chevron">▾</span><h2>Selezioni salvate</h2>
+        </button>
+        <span class="hint">un click le riapplica</span>
+      </div>
+      <div id="selections"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Anteprima</h2>
+        <div class="head-actions">
+          <label class="check"><input type="checkbox" id="auto-preview"> automatica</label>
+          <button id="preview" class="primary small">Aggiorna</button>
+          <span class="sep"></span>
+          <button id="export-jpeg" class="ghost small">JPEG</button>
+          <button id="export-latex" class="ghost small">LaTeX</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <label class="field wide"><span>cosa plottare</span>
+          <select id="grid-metric"></select>
+        </label>
+        <label class="field"><span>righe</span><select id="grid-rows"></select></label>
+        <label class="field"><span>colonne</span><select id="grid-cols"></select></label>
+        <label class="field"><span>banda</span>
+          <select id="grid-band">
+            <option value="se">errore std</option>
+            <option value="std">deviazione std</option>
+            <option value="ci95">IC 95%</option>
+            <option value="iqr">IQR</option>
+            <option value="minmax">min–max</option>
+            <option value="none">nessuna</option>
+          </select>
+        </label>
+        <label class="field narrow"><span>smooth</span>
+          <input type="number" id="grid-smooth" value="5" min="1" max="30">
+        </label>
+        <label class="field"><span>baseline</span>
+          <select id="grid-baseline">
+            <option value="">nessuna</option>
+          </select>
+        </label>
+        <label class="field" id="grid-baseline-epochs-field" hidden>
+          <span>2ª baseline (tratteggiata)</span>
+          <select id="grid-baseline-epochs"></select>
+        </label>
+      </div>
+
+      <div class="hue-row">
+        <span class="field-label">colori</span>
+        <div id="grid-hue"></div>
+      </div>
+      <p class="hint hue-hint">vuoto = automatico: una curva per ogni configurazione che varia</p>
+      <div id="preview-box"><p class="placeholder">Premi «Aggiorna» per disegnare l'anteprima.</p></div>
+
+      <div id="series-box" hidden>
+        <div class="card-head">
+          <h3>Serie</h3>
+          <span class="hint">il ritocco vale in tutti i pannelli e resta nella selezione salvata</span>
+        </div>
+        <div id="series-list"></div>
+        <div id="series-edit" hidden>
+          <label class="field wide"><span>nome</span>
+            <input type="text" id="series-name" autocomplete="off">
+          </label>
+          <div class="field wide"><span>colore</span><div id="series-palette"></div></div>
+          <div class="head-actions">
+            <button id="series-reset" class="ghost small">Ripristina</button>
+            <button id="series-rule" class="ghost small">Copia regola per style.toml</button>
+          </div>
+        </div>
+      </div>
+
+      <p id="download-box" class="hint download-box" hidden></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Copertura</h2><span id="coverage-note" class="hint"></span></div>
+      <div id="coverage"></div>
+    </section>
+
+    <footer>
+      <p class="hint">La selezione salvata finisce in <code id="selection-path"></code>.
+      Poi in chat: «fai il plot della reward eval della selezione».</p>
+    </footer>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
