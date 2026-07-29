@@ -28,9 +28,6 @@ def main(cfg: DictConfig):
         batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
         n_minibatch_effective = exp.n_minibatch
 
-    if exp.fresh_adv:
-        exp.on_policy_critic = False
-
     # logger
     if exp.window_size > 1:
         if exp.weight_type == "geppo":
