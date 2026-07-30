@@ -32,11 +32,15 @@ SPEC_VERSION = 2
 
 @dataclass
 class BaselineSpec:
-    """Curva nera di riferimento, cercata sempre nell'indice completo.
+    """Curve nere di riferimento, cercate sempre nell'indice completo.
 
-    Due modi di indicarla, stesso disegno:
-      - `filters`: sintassi degli script (`family=PPO env=Hopper-v5`);
-      - `family`: la tendina del selettore.
+    Due modi di indicarle, stesso disegno:
+      - `filters`: sintassi degli script (`family=PPO,GePPO-original env=Hopper-v5`);
+      - `family`: le pillole del selettore.
+
+    `family` accetta una famiglia sola (forma vecchia, ancora nelle selezioni
+    salvate) o un elenco: le baseline scelte si disegnano tutte, nere, una per
+    tratteggio (vedi `[lines].baseline_styles` in style.toml).
 
     `epochs` aggiunge una seconda baseline tratteggiata a epoche moltiplicate:
     un numero (×2, ×4, ×8) oppure "follow_window", che in ogni pannello usa il
@@ -45,11 +49,18 @@ class BaselineSpec:
     """
 
     filters: list = field(default_factory=list)
-    family: str | None = None
+    family: str | list | None = None
     epochs: str = ""
 
+    def families(self) -> list:
+        """Le famiglie scelte, sempre come lista (vuota se non ce n'e')."""
+        fam = self.family
+        if not fam:
+            return []
+        return [f for f in ([fam] if isinstance(fam, str) else list(fam)) if f]
+
     def active(self) -> bool:
-        return bool(self.filters or self.family)
+        return bool(self.filters or self.families())
 
 
 @dataclass
@@ -155,12 +166,14 @@ def _series_styles(agg, ckey_colors: dict) -> dict:
 
 
 def _apply_overrides(agg, order, styles, matches, overrides: dict):
-    """Applica i ritocchi fatti a mano nell'anteprima (nome e colore di una serie).
+    """Applica i ritocchi fatti a mano nell'anteprima (nome, colore, tratteggio).
 
     Sono indicizzati per etichetta *di partenza*, quella calcolata dai dati: cosi'
     rinominare non fa perdere il collegamento, e cambiare i colori o i filtri non
     sposta il ritocco su un'altra curva. Una serie che non c'e' piu' viene
     ignorata in silenzio — la selezione e' cambiata, non c'e' niente da fare.
+    Vale sia per le serie normali sia per le baseline: chiamata due volte con
+    due `styles` distinti, uno per gruppo (vedi `_baseline_blocks`).
     """
     overrides = {k: v for k, v in (overrides or {}).items() if k in styles}
     if not overrides:
@@ -171,6 +184,8 @@ def _apply_overrides(agg, order, styles, matches, overrides: dict):
         style = dict(styles.pop(original))
         if over.get("color"):
             style["color"] = over["color"]
+        if over.get("style"):
+            style["style"] = over["style"]
         if new != original:
             # rinominando a mano vince il nome scelto, anche nel .tex: tenere la
             # macro della regola farebbe uscire un'etichetta diversa da quella
@@ -223,19 +238,22 @@ def _sort_ascending(df, cols) -> list:
 # --- baseline ---------------------------------------------------------------
 
 def _baseline_blocks(full_index, sel, spec: FigureSpec, panel_fields, metric):
-    """DataFrame aggregato delle baseline (con colonna `dash`), o None."""
+    """DataFrame aggregato delle baseline (con colonne `color`/`style`), o None.
+
+    Le baseline richieste possono essere piu' d'una (`family` e' un elenco, o i
+    filtri ne pescano diverse): ognuna e' un blocco a se', con il proprio
+    tratteggio di default, cosi' restano distinguibili pur essendo tutte nere —
+    ma nome, colore e tratteggio si possono ritoccare a mano come per le serie
+    normali (`spec.series_overrides`, stessa chiave: l'etichetta).
+    """
     conf = spec.baseline
     if not conf.active() or full_index is None:
         return None
     if conf.filters:
         pool = select_runs(full_index, conf.filters, state=spec.state)
     else:
-        pool = full_index[(full_index.family == conf.family)
+        pool = full_index[full_index.family.isin(conf.families())
                           & (full_index.state == "finished")]
-    # Le PPO delle ablation sul clip hanno epoch_mult=1 come la baseline vera:
-    # senza escluderle finirebbero mediate dentro di essa.
-    if "ablation" in pool.columns:
-        pool = pool[pool.ablation.isna()]
     # Ristrette agli environment della selezione: altrimenti in ogni pannello
     # finiscono baseline di environment diversi.
     if "env" in sel.columns and sel.env.notna().any() and "env" in pool.columns:
@@ -244,7 +262,7 @@ def _baseline_blocks(full_index, sel, spec: FigureSpec, panel_fields, metric):
         print("[plot] attenzione: nessun run di baseline trovato")
         return None
 
-    def block(runs, dash: bool, label_suffix: str = "", fixed=None):
+    def block(runs, style: str, label_suffix: str = "", fixed=None):
         if runs.empty:
             return None
         curves = load_curves(runs, source=spec.source, metric=metric, verbose=False)
@@ -254,8 +272,10 @@ def _baseline_blocks(full_index, sel, spec: FigureSpec, panel_fields, metric):
         # famiglia ed environment e poi si replicano sui pannelli.
         agg = aggregate(curves, runs, ["env", "family"], band=spec.band,
                         smooth=spec.smooth, grid_points=spec.grid_points, xmax=spec.xmax)
-        agg["label"] = [S.mathtt(str(f)) + label_suffix for f in agg["family"]]
-        agg["dash"] = dash
+        agg["label"] = [S.mathtt(L.family_name({"family": f}, paper=spec.paper))
+                        + label_suffix for f in agg["family"]]
+        agg["color"] = S.baseline_color()
+        agg["style"] = style
         for f in panel_fields:
             if fixed and f in fixed:
                 agg[f] = fixed[f]          # vale per un pannello solo
@@ -265,26 +285,62 @@ def _baseline_blocks(full_index, sel, spec: FigureSpec, panel_fields, metric):
                     agg = agg.merge(pd.DataFrame({f: vals}), how="cross")
         return agg
 
-    # Il riferimento e' il PPO a epoche base: senza questa riga B2 e B3 (x1 e
-    # x2/x4/x8) finiscono mediati in un'unica linea nera.
-    base_pool = pool
-    if "epoch_mult" in pool.columns and pool.epoch_mult.nunique(dropna=False) > 1:
-        at_one = pool[pool.epoch_mult == 1]
-        base_pool = at_one if not at_one.empty else pool
-    blocks = [block(base_pool, dash=False)]
+    # Ordine: quello scelto nella pagina; con i filtri, quello dell'indice.
+    found = list(dict.fromkeys(pool.family.dropna()))
+    fams = [f for f in conf.families() if f in set(found)] or found
+    styles = S.baseline_styles()
+    blocks = []
+    for i, fam in enumerate(fams):
+        fam_pool = pool[pool.family == fam]
+        # Le PPO delle ablation sul clip hanno epoch_mult=1 come la baseline
+        # vera: senza escluderle finirebbero mediate dentro di essa. Dove invece
+        # la famiglia esiste *solo* dentro un'ablation — GePPO-original sta
+        # tutto sotto `ablation=geppo_original` — non c'e' niente da escludere.
+        if "ablation" in fam_pool.columns:
+            clean = fam_pool[fam_pool.ablation.isna()]
+            fam_pool = clean if not clean.empty else fam_pool
+        # Il riferimento e' la variante a epoche base: senza questa riga B2 e B3
+        # (x1 e x2/x4/x8) finiscono mediati in un'unica linea nera.
+        base_pool = fam_pool
+        if "epoch_mult" in fam_pool.columns and fam_pool.epoch_mult.nunique(dropna=False) > 1:
+            at_one = fam_pool[fam_pool.epoch_mult == 1]
+            base_pool = at_one if not at_one.empty else fam_pool
+        blocks.append(block(base_pool, styles[i % len(styles)]))
 
-    extra = str(conf.epochs or "")
-    if extra == "follow_window" and "window" in sel.columns:
-        for w in sorted(w for w in sel.window.dropna().unique() if w > 1):
-            blocks.append(block(pool[pool.epoch_mult == w], True,
-                                r" ($\omega \tilde{K}$ epochs)", {"window": w}))
-    elif extra not in ("", "none"):
-        mult = float(extra)
-        blocks.append(block(pool[pool.epoch_mult == mult], True,
-                            rf" ($\times {int(mult)}$ epochs)"))
+        extra = str(conf.epochs or "")
+        if extra == "follow_window" and "window" in sel.columns:
+            for w in sorted(w for w in sel.window.dropna().unique() if w > 1):
+                blocks.append(block(fam_pool[fam_pool.epoch_mult == w], "dashed",
+                                    r" ($\omega \tilde{K}$ epochs)", {"window": w}))
+        elif extra not in ("", "none"):
+            mult = float(extra)
+            blocks.append(block(fam_pool[fam_pool.epoch_mult == mult], "dashed",
+                                rf" ($\times {int(mult)}$ epochs)"))
 
     blocks = [b for b in blocks if b is not None]
-    return pd.concat(blocks, ignore_index=True) if blocks else None
+    if not blocks:
+        return None
+    agg = pd.concat(blocks, ignore_index=True)
+    return _apply_baseline_overrides(agg, spec.series_overrides)
+
+
+def _apply_baseline_overrides(agg, overrides: dict):
+    """Ritocchi a mano (nome/colore/tratteggio) sulle etichette delle baseline.
+
+    Stesso meccanismo delle serie normali (`_apply_overrides`), ma qui `styles`
+    si costruisce dalle colonne gia' calcolate (`color`, `style`) invece che
+    dalle regole di `style.toml`, che le baseline non consultano.
+    """
+    if not overrides:
+        return agg
+    styles = {rec["label"]: {"color": rec["color"], "style": rec["style"]}
+              for rec in agg.drop_duplicates("label").to_dict("records")}
+    agg, _, styles, _ = _apply_overrides(agg, [], styles, {}, overrides)
+    for lab, st in styles.items():
+        mask = agg.label == lab
+        agg.loc[mask, "color"] = st["color"]
+        agg.loc[mask, "style"] = st["style"]
+    return agg
 
 
 # --- pipeline ---------------------------------------------------------------

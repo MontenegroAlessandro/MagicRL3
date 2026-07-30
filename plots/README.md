@@ -71,11 +71,15 @@ Con «non è» e «non fra» le pillole scelte diventano rosse e barrate: sono
 esclusioni. La stringa di «Copia filtri» usa la stessa sintassi degli script
 (`family!=PPO,SAC`), quindi resta incollabile in `--filter`.
 
-Il numero accanto a ogni valore è **quante run resterebbero scegliendolo**: tiene
-conto di tutti gli altri filtri attivi ma non di quelli della sua stessa dimensione
-(come nelle ricerche a faccette), e i valori che porterebbero a zero run sono
-sbiaditi. Con un operatore negativo il numero risponde alla domanda giusta —
-quante run resterebbero **escludendo** quel valore.
+Il numero accanto a ogni valore è **quante configurazioni distinte
+resterebbero scegliendolo** (combinazioni di iperparametri, non run: i seed
+della stessa configurazione contano una volta sola, altrimenti una
+combinazione con dieci seed sembrerebbe dieci volte più presente di una con un
+seed solo). Tiene conto di tutti gli altri filtri attivi ma non di quelli
+della sua stessa dimensione (come nelle ricerche a faccette), e i valori che
+porterebbero a zero configurazioni sono sbiaditi. Con un operatore negativo il
+numero risponde alla domanda giusta — quante configurazioni resterebbero
+**escludendo** quel valore.
 
 Le selezioni si salvano **con un nome** e restano nella lista «Selezioni salvate»:
 un click le riapplica (filtri, seed e impostazioni di griglia), la ✕ le elimina.
@@ -168,6 +172,7 @@ L'indice unisce **otto progetti W&B**, distinti dalla colonna `source`:
 |---|---|---|
 | `wandb` | `rebuttal`, `rt-ppo-ablations` | campagne attuali (sottospazi W1, W3, baseline SAC/TD3, ablation) |
 | `paper` | `forzaroma-rt-ppo-{ant,hopper,reacher,swimmer,walker}`, `erghosting-rt-ppo-half-cheetah` | run del paper (P1, P2, B2, B3) |
+| `geppo-orig` | `rt-ppo-ablations`, tag `geppo_original` | run della codebase originale di GePPO |
 
 Un progetto per environment: è una convenzione dei lanci del paper, l'env sta
 comunque nella config. Per HalfCheetah vale `erghosting-…`, non
@@ -180,6 +185,16 @@ che siano senza metadati e che serva ricostruirli dal nome del run. Non serve:
 `build_index.py` chiama sempre `load()` e le run del paper finiscono nell'indice
 con lo stesso schema delle altre — `env`, `family`, `window`, `is_type`, `setting`,
 `opc`, `seed`, `fresh_adv`, `sampling` tutti popolati, zero valori mancanti.
+
+La fonte `geppo-orig` sta **nello stesso progetto** delle campagne attuali, quindi
+non si riconosce dal progetto ma dal tag `geppo_original` (`claim_tags`): la sua
+config è piatta (`env_kwargs/env_name`, `runner_kwargs/M`, `ac_kwargs/eps_ppo`)
+invece di stare sotto `experiment`. `family = GePPO-original`,
+`window = runner_kwargs/M`, `setting` vuoto (configurazioni tunate, fuori dalla
+griglia 1/2/3), `ablation = geppo_original` — quindi `ablation=none` continua a
+isolare P1+P2+B2+B3 e le figure esistenti non cambiano. `fresh_adv`, `opc`,
+`sampling`, `seq`, `is_type` restano vuoti: nella codebase originale non esistono
+come opzioni. Nessun `.npz` locale: le curve vengono dalla history W&B.
 
 Tutto ciò che distingue una fonte dall'altra sta in `rtplots/sources/`: un file
 per *convenzione* (`current.py`, `paper.py`) con i tag che contano, i default
@@ -326,9 +341,11 @@ mediate insieme.
 
 `--hue` decide i **colori** (restano gli stessi in tutti i pannelli), `--label-fields`
 decide cosa compare in **legenda**: mettendoci anche `window` si ottiene
-«ωPPO-BH: ω = 4» come nella figura del paper. Con `--baseline` si sovrappone in
-nero una baseline (in W&B ci sono solo SAC/TD3: `--baseline family=SAC env=Hopper-v5`;
-run PPO non ne esistono ancora).
+«ωPPO-BH: ω = 4» come nella figura del paper. Con `--baseline` si sovrappongono in
+nero una o più baseline (`--baseline family=SAC env=Hopper-v5`): le famiglie si
+elencano con la virgola — `--baseline family=PPO,GePPO-original` — e si
+distinguono per tratteggio (continua, `-.`, `:`, vedi `[lines].baseline_styles`).
+Nel selettore sono pillole, quindi se ne accendono quante se ne vuole.
 
 Confronto GePPO vs RT-PPO sui quattro environment W&B:
 

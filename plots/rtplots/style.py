@@ -57,6 +57,19 @@ def baseline_width() -> float:
     return float(R.get("lines", "baseline_width"))
 
 
+def baseline_styles() -> list[str]:
+    """Tratteggi di default delle baseline, nell'ordine in cui vengono assegnati.
+
+    Con piu' di una baseline nello stesso pannello il colore non basta a
+    distinguerle (sono nere per convenzione): la prima e' continua, le altre
+    seguono questa lista. Stesse parole di `[[series]].style` (solid, dashed,
+    dotted, dashdot), cosi' l'anteprima le puo' ritoccare con lo stesso
+    controllo. "dashed" resta riservato alla baseline a epoche moltiplicate.
+    """
+    styles = list(R.get("lines", "baseline_styles") or [])
+    return styles or ["solid", "dashdot", "dotted"]
+
+
 def color_cycle(n: int) -> list[str]:
     """n colori distinti dalla palette del file, allungata se non bastano."""
     palette = R.palette() or IBM_ORDER

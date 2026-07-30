@@ -130,10 +130,19 @@ button:disabled { opacity: .5; cursor: default; }
 .field select { min-width: 130px; max-width: 220px; }
 .field.wide select { min-width: 240px; max-width: 320px; }
 .field.narrow input[type=number] { width: 72px; }
+.size-px { display: flex; align-items: center; gap: 5px; }
+.size-px input[type=number] { width: 58px; }
+.size-px span { color: var(--muted); font-size: 12px; }
 
-.hue-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.hue-row .pills { flex-wrap: wrap; }
-.hue-hint { margin-bottom: 12px; }
+.baseline-row { margin-top: -6px; }
+/* le baseline sono sempre nere nel grafico: il blu di ".pill.on" (che altrove
+   anticipa il colore della curva) sarebbe fuorviante qui, quindi l'accesa si
+   segna solo con inchiostro pieno, senza colore */
+.pills-mono .pill.on {
+  background: var(--ink); border-color: var(--ink); color: var(--bg);
+}
+.pills-mono .pill.on .count { color: var(--bg); opacity: .8; }
+
 #preview-box { text-align: center; min-height: 120px; }
 #preview-box img { max-width: 100%; border-radius: 6px; }
 .placeholder { color: var(--muted); font-size: 13px; padding: 24px 0; margin: 0; }
@@ -215,6 +224,17 @@ th.pick, td.pick { width: 1.8rem; text-align: center; padding-right: 0; }
 tr.off td:not(.pick) { opacity: 0.38; text-decoration: line-through; }
 .badge.excluded { border-color: var(--orange); color: var(--orange); }
 #coverage { max-height: 420px; overflow: auto; }
+
+/* pin: la riga resta nel grafico anche quando i filtri la taglierebbero fuori */
+th.pin, td.pin { width: 1.8rem; text-align: center; padding-right: 0; }
+.pin-btn {
+  background: none; border: none; cursor: pointer; padding: 0 2px;
+  font-size: 13px; opacity: .22; filter: grayscale(1);
+}
+.pin-btn:hover { opacity: .6; }
+.pin-btn.on { opacity: 1; filter: none; }
+tr.pinned td:not(.pick):not(.pin) { background: color-mix(in srgb, var(--blue) 7%, transparent); }
+.badge.pinned { border-color: var(--blue); color: var(--blue); }
 
 .toast {
   position: fixed; bottom: 18px; right: 18px; background: var(--ink); color: var(--bg);

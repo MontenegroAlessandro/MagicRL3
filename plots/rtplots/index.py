@@ -85,7 +85,7 @@ def build_index(force: bool = False, workers: int = 8,
         try:
             # Indispensabile: nell'elenco la config dei progetti del paper e' vuota.
             run.load(force=True)
-            return sources.for_project(project).row(run, project)
+            return sources.for_run(run.tags, project).row(run, project)
         except Exception as exc:  # run corrotto o rimosso: non blocca l'indice
             return dict(run_id=run.id, name=run.name, state=run.state, project=project,
                         tags=",".join(run.tags or []), error=str(exc))

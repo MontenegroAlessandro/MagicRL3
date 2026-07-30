@@ -25,9 +25,32 @@ from ..paths import SELECTION_JSON
 MAX_WANDB_RUNS = 120
 MAX_PREVIEW_RUNS = 800
 MAX_PANELS = 24
+PREVIEW_DPI = 110   # risoluzione dell'anteprima: converte i px scelti in pollici
 
 
 # --- vocabolario delle dimensioni -------------------------------------------
+
+def _config_cols(df: pd.DataFrame, col: str) -> list[str]:
+    """Colonne che identificano una configurazione (non una run).
+
+    Una configurazione e' una combinazione di iperparametri (`schema.SERIES_FIELDS`):
+    i seed ripetuti della stessa configurazione contano una volta sola, cosi' il
+    numero non gonfia le combinazioni che hanno piu' seed rispetto a quelle che ne
+    hanno pochi. Se `col` non fa gia' parte di SERIES_FIELDS (es. `state`,
+    `campaign`, `project`) si aggiunge, altrimenti il conteggio per quella
+    dimensione collasserebbe le sue stesse distinzioni.
+    """
+    cols = [c for c in schema.SERIES_FIELDS if c in df.columns]
+    if col not in cols:
+        cols = cols + [col]
+    return cols
+
+
+def _config_value_counts(df: pd.DataFrame, col: str) -> pd.Series:
+    """Quante configurazioni distinte (non run) hanno ciascun valore di `col`."""
+    uniq = df.drop_duplicates(subset=_config_cols(df, col))
+    return uniq[col].astype(str).value_counts()
+
 
 def dimension_values(df: pd.DataFrame) -> list[dict]:
     out = []
@@ -41,11 +64,12 @@ def dimension_values(df: pd.DataFrame) -> list[dict]:
             vals = sorted(vals)
         except TypeError:
             vals = sorted(vals, key=str)
+        counts = _config_value_counts(df, col)
         out.append({
             "col": col,
             "title": schema.title(col),
             "values": [{"value": str(v), "label": schema.html_value(col, v),
-                        "count": int((df[col].astype(str) == str(v)).sum())} for v in vals],
+                        "count": int(counts.get(str(v), 0))} for v in vals],
         })
     return out
 
@@ -100,16 +124,43 @@ def apply_ui_filters(df: pd.DataFrame, sel: dict, exclusions: bool = True) -> pd
     return out
 
 
+def with_pinned(df: pd.DataFrame, sub: pd.DataFrame, sel: dict) -> pd.DataFrame:
+    """Aggiunge alla selezione le run pinnate dalla tabella di copertura.
+
+    Il pin e' l'inverso dell'esclusione: fa entrare run che i filtri correnti
+    taglierebbero fuori, cosi' si confrontano configurazioni che nessun filtro
+    terrebbe insieme. Sopravvive ai cambi di filtro (e' il suo scopo).
+    """
+    pinned = set(sel.get("pinned") or [])
+    if not pinned:
+        return sub
+    extra = df[df.run_id.isin(pinned) & ~df.run_id.isin(sub.run_id)]
+    return pd.concat([sub, extra]) if len(extra) else sub
+
+
+def selected_runs(df: pd.DataFrame, sel: dict) -> pd.DataFrame:
+    """La selezione completa della pagina: filtri, piu' pinnate, meno escluse."""
+    sub = with_pinned(df, apply_ui_filters(df, sel, exclusions=False), sel)
+    excluded = set(sel.get("excluded") or [])
+    return sub[~sub.run_id.isin(excluded)] if excluded else sub
+
+
 def live_counts(df: pd.DataFrame, sel: dict) -> dict:
-    """Per ogni valore, quante run resterebbero scegliendolo.
+    """Per ogni valore, quante configurazioni distinte resterebbero scegliendolo.
+
+    Configurazioni, non run: i seed della stessa combinazione di iperparametri
+    contano una volta sola, altrimenti una configurazione con dieci seed
+    sembrerebbe dieci volte piu' presente di una con un seed solo, quando in
+    realta' e' una scelta sola in piu' nella griglia.
 
     Il conteggio di una dimensione ignora i filtri della dimensione stessa (come
     nelle ricerche a faccette): cosi' i numeri dicono quanto resta *in piu'* o
     *in meno* rispetto a quello che si sta guardando.
 
     Con un operatore negativo scegliere un valore vuol dire toglierlo, quindi il
-    numero e' quante run resterebbero **escludendolo**: mostrare il conteggio
-    delle run che lo hanno direbbe l'opposto di quello che succede cliccando.
+    numero e' quante configurazioni resterebbero **escludendolo**: mostrare il
+    conteggio di quelle che lo hanno direbbe l'opposto di quello che succede
+    cliccando.
     """
     dims = sel.get("dims") or {}
     out = {}
@@ -118,14 +169,14 @@ def live_counts(df: pd.DataFrame, sel: dict) -> dict:
             continue
         others = {k: v for k, v in dims.items() if k != col}
         sub = apply_ui_filters(df, {**sel, "dims": others})
-        counts = sub[col].astype(str).value_counts()
+        counts = _config_value_counts(sub, col)
         op, _ = dim_filter(dims.get(col))
         if op in NEGATIVE_OPS:
             # le esclusioni gia' attive restano: il numero risponde a «e se
             # togliessi anche questo?»
             kept = apply_ui_filters(df, {**sel, "dims": {**others, col: dims[col]}})
-            base = len(kept)
-            kept_counts = kept[col].astype(str).value_counts()
+            base = kept.drop_duplicates(subset=_config_cols(kept, col)).shape[0]
+            kept_counts = _config_value_counts(kept, col)
             out[col] = {str(k): int(base - kept_counts.get(str(k), 0))
                         for k in counts.index}
         else:
@@ -164,7 +215,8 @@ def filter_args(sel: dict, df: pd.DataFrame) -> list[str]:
     return args
 
 
-def coverage_rows(sel_df: pd.DataFrame, excluded=(), limit: int = 300) -> dict:
+def coverage_rows(sel_df: pd.DataFrame, excluded=(), pinned=(),
+                  limit: int = 300) -> dict:
     """Tabella di copertura sulle sole dimensioni che variano nella selezione.
 
     Ogni riga porta con se' i propri `run_ids`: e' cosi' che la pagina puo'
@@ -179,6 +231,7 @@ def coverage_rows(sel_df: pd.DataFrame, excluded=(), limit: int = 300) -> dict:
     if not varying:
         return {"columns": [], "rows": []}
     excluded = set(excluded)
+    pinned = set(pinned)
     g = (sel_df.groupby(varying, dropna=False)
          .agg(n_runs=("run_id", "size"), n_seeds=("seed", "nunique"),
               seeds=("seed", lambda s: ",".join(str(int(x)) for x in sorted(s.dropna().unique()))),
@@ -201,6 +254,8 @@ def coverage_rows(sel_df: pd.DataFrame, excluded=(), limit: int = 300) -> dict:
             # anche quando e' spenta del tutto
             "n_kept": len(kept), "n_seeds_kept": int(len(set(seeds_kept))),
             "on": len(kept) > 0,
+            # pinnata = tutte le sue run lo sono: mezza riga pinnata non esiste
+            "pinned": bool(ids) and all(i in pinned for i in ids),
         })
     return {"columns": [schema.title(c) for c in varying], "rows": rows,
             "truncated": len(g) > limit}
@@ -243,7 +298,7 @@ def wandb_cost_guard(sub: pd.DataFrame, metric: str | None) -> str | None:
 
 
 def render(index: pd.DataFrame, sub: pd.DataFrame, payload: dict,
-           fmt: str = "png", dpi: int = 110, plot_lock=None) -> dict:
+           fmt: str = "png", dpi: int = PREVIEW_DPI, plot_lock=None) -> dict:
     """Disegna la figura e la restituisce come byte grezzi.
 
     Stesso percorso per anteprima (png), download (jpeg) e LaTeX (pdf).
@@ -279,7 +334,9 @@ def render(index: pd.DataFrame, sub: pd.DataFrame, payload: dict,
 
 
 def series_list(series: F.Series, spec: F.FigureSpec) -> list[dict]:
-    """Le serie della figura, con quello che serve alla pagina per ritoccarle.
+    """Le serie della figura (curve normali e baseline), con quello che serve
+    alla pagina per ritoccarle: le baseline si ritoccano con lo stesso
+    meccanismo (nome/colore/tratteggio indicizzati per etichetta di partenza).
 
     `key` e' l'etichetta di partenza, quella con cui si indicizza il ritocco:
     resta la stessa anche dopo aver rinominato, altrimenti al secondo giro il
@@ -287,18 +344,27 @@ def series_list(series: F.Series, spec: F.FigureSpec) -> list[dict]:
     """
     overrides = spec.series_overrides or {}
     renamed = {(o.get("name") or "").strip() or k: k for k, o in overrides.items()}
-    out = []
-    for label in series.order:
+
+    def entry(label: str, style: dict, match: dict) -> dict:
         key = renamed.get(label, label)
-        style = series.styles.get(label) or {}
-        out.append({
+        over = overrides.get(key) or {}
+        return {
             "key": key,
             "label": label,
             "color": style.get("color"),
+            "style": style.get("style", "solid"),
             "renamed": key != label,
-            "recolored": bool((overrides.get(key) or {}).get("color")),
-            "rule": rule_snippet(label, series.matches.get(label) or {}, style),
-        })
+            "recolored": bool(over.get("color")),
+            "restyled": bool(over.get("style")),
+            "rule": rule_snippet(label, match, style),
+        }
+
+    out = [entry(label, series.styles.get(label) or {}, series.matches.get(label) or {})
+           for label in series.order]
+    if series.baseline is not None:
+        for rec in series.baseline.drop_duplicates("label").to_dict("records"):
+            style = {"color": rec.get("color"), "style": rec.get("style", "solid")}
+            out.append(entry(rec["label"], style, {"family": rec.get("family")}))
     return out
 
 
@@ -309,6 +375,8 @@ def rule_snippet(label: str, match: dict, style: dict) -> str:
     lines = [f"match = {{ {pairs} }}"] if pairs else ["match = { }  # da completare"]
     if style.get("color"):
         lines.append(f'color = "{style["color"]}"')
+    if style.get("style") and style["style"] != "solid":
+        lines.append(f'style = "{style["style"]}"')
     lines.append(f"name  = {_toml_literal(label)}")
     if style.get("latex"):
         lines.append(f"latex = {_toml_literal(style['latex'])}")
@@ -475,17 +543,21 @@ def dimensions(df: pd.DataFrame) -> dict:
 
 
 def query(df: pd.DataFrame, payload: dict) -> dict:
-    sub = apply_ui_filters(df, payload)
     # la copertura si costruisce prima delle esclusioni, cosi' le righe spente
-    # restano in tabella e si possono riattivare
-    unfiltered = apply_ui_filters(df, payload, exclusions=False)
+    # restano in tabella e si possono riattivare; le pinnate entrano qui, cosi'
+    # restano in tabella anche quando i filtri correnti le taglierebbero fuori
+    unfiltered = with_pinned(df, apply_ui_filters(df, payload, exclusions=False),
+                             payload)
+    excluded = set(payload.get("excluded") or [])
+    sub = unfiltered[~unfiltered.run_id.isin(excluded)] if excluded else unfiltered
     grid_cols = [c for c in schema.GRID_FIELDS if c in sub.columns]
     return {
         "n_runs": int(len(sub)),
         "n_excluded": int(len(unfiltered) - len(sub)),
         "n_configs": int(sub.groupby(grid_cols, dropna=False).ngroups) if len(sub) else 0,
         "states": sub.state.value_counts().to_dict() if len(sub) else {},
-        "coverage": (coverage_rows(unfiltered, payload.get("excluded") or [])
+        "coverage": (coverage_rows(unfiltered, payload.get("excluded") or [],
+                                   payload.get("pinned") or [])
                      if len(unfiltered) else {"columns": [], "rows": []}),
         "counts": live_counts(df, payload),
         "filter_args": filter_args(payload, df),
@@ -493,7 +565,7 @@ def query(df: pd.DataFrame, payload: dict) -> dict:
 
 
 def preview(df: pd.DataFrame, payload: dict, plot_lock=None) -> dict:
-    sub = apply_ui_filters(df, payload)
+    sub = selected_runs(df, payload)
     if sub.empty:
         return {"error": "Nessuna run selezionata."}
     if len(sub) > MAX_PREVIEW_RUNS:
@@ -502,13 +574,13 @@ def preview(df: pd.DataFrame, payload: dict, plot_lock=None) -> dict:
     if err:
         return {"error": err}
     t0 = time.time()
-    res = render(df, sub, payload, fmt="png", dpi=110, plot_lock=plot_lock)
+    res = render(df, sub, payload, fmt="png", dpi=PREVIEW_DPI, plot_lock=plot_lock)
     res["elapsed"] = round(time.time() - t0, 2)
     return res
 
 
 def save(df: pd.DataFrame, payload: dict) -> dict:
-    sub = apply_ui_filters(df, payload)
+    sub = selected_runs(df, payload)
     name = (payload.get("name") or "").strip() or \
         datetime.now().strftime("selezione %d/%m %H:%M")
     slug = selection.slugify(name)
@@ -525,6 +597,8 @@ def save(df: pd.DataFrame, payload: dict) -> dict:
         # run tolte a mano dalla copertura: senza, riaprendo la selezione
         # tornerebbero dentro
         "excluded": list(payload.get("excluded") or []),
+        # run pinnate: entrano nel grafico anche fuori dai filtri correnti
+        "pinned": list(payload.get("pinned") or []),
         "run_ids": sub.run_id.tolist(),
         "spec": spec_from_payload(payload, sub).to_dict(),
     })

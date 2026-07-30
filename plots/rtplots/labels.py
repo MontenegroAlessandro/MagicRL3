@@ -43,6 +43,8 @@ def family_name(row, paper: bool = True, latex: bool = False) -> str:
         return fam
     if fam == "GePPO":
         return "GePPO"
+    if fam == "GePPO-original":
+        return "GePPO-orig"
     is_type = row.get("is_type") or "N"
     if paper:
         return PAPER_FAMILY.get((fam, is_type), f"{fam}-{is_type}")

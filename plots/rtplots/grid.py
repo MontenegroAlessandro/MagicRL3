@@ -74,13 +74,14 @@ def draw_grid(agg, order, styles, opts: GridOptions, base_agg=None):
                 for lab, g in b.groupby("label"):
                     g = g.sort_values("step")
                     x = g["step"] / opts.xscale
-                    # colonna 'dash': permette due baseline nello stesso pannello
-                    # (p.es. PPO base continua + PPO a epoche moltiplicate)
-                    dashed = bool(g["dash"].iloc[0]) if "dash" in g.columns else False
-                    ax.plot(x, g["mean"], color=S.baseline_color(),
-                            lw=S.baseline_width(),
-                            ls="--" if dashed else "-", label=lab, zorder=1)
-                    ax.fill_between(x, g["lo"], g["hi"], color=S.baseline_color(),
+                    # 'color'/'style' per riga: di norma tutte nere con tratteggi
+                    # diversi (p.es. PPO continua + GePPO-original + PPO a epoche
+                    # moltiplicate), ma un ritocco a mano puo' averle cambiate
+                    color = g["color"].iloc[0] if "color" in g.columns else S.baseline_color()
+                    style = g["style"].iloc[0] if "style" in g.columns else "solid"
+                    ax.plot(x, g["mean"], color=color, lw=S.baseline_width(),
+                            ls=style, label=lab, zorder=1)
+                    ax.fill_between(x, g["lo"], g["hi"], color=color,
                                     alpha=S.band_alpha(), lw=0, zorder=0)
 
             for lab in order:

@@ -1,5 +1,10 @@
 /* Selettore run: filtri -> /api/query (copertura) e /api/preview (grafico). */
 
+// risoluzione dell'anteprima (vedi PREVIEW_DPI in webui/api.py): converte i px
+// scelti nella casella "dimensione" nei pollici che FigureSpec.panel_size vuole
+const PREVIEW_DPI = 110;
+const DEFAULT_SIZE_PX = 500;
+
 const state = {
   // colonna -> {op, values}: l'operatore decide se i valori scelti si tengono
   // (è / fra) o si escludono (non è / non fra), e se se ne puo' scegliere piu' di uno
@@ -8,12 +13,17 @@ const state = {
   // run tolte a mano dalla tabella di copertura: restano visibili in tabella
   // ma non entrano nel grafico
   excluded: new Set(),
+  // run pinnate dalla copertura: entrano nel grafico anche quando i filtri
+  // correnti le taglierebbero fuori, e sopravvivono ai cambi di filtro —
+  // servono a confrontare configurazioni che nessun filtro terrebbe insieme
+  pinned: new Set(),
   // hue vuoto = automatico: una serie per ogni configurazione che varia
   // baseline: curva nera sovrapposta, cercata nell'indice completo e non nella
   // selezione. epoch_mult sceglie la variante di PPO (B2 = x1, B3 = x2/x4/x8)
   // senza filtrare le curve principali, che hanno un loro epoch_mult.
-  grid: { rows: "", cols: "", hue: [], band: "se", smooth: 5, metric: "eval/mean_reward",
-          baseline: { family: "", epochs: "" } },
+  grid: { rows: "", cols: "", hue: [], band: "ci95", smooth: 5, metric: "eval/mean_reward",
+          panel_size: [DEFAULT_SIZE_PX / PREVIEW_DPI, DEFAULT_SIZE_PX / PREVIEW_DPI],
+          baseline: { family: [], epochs: "" } },
   // ritocchi a mano delle serie: etichetta di partenza -> {name, color}
   series_overrides: {},
   series: [],            // ultimo elenco di serie disegnate
@@ -45,7 +55,6 @@ function toast(msg) {
 
 const pillIndex = {};   // colonna -> valore -> {input, label, countEl}
 const opIndex = {};     // colonna -> <select> dell'operatore
-const hueIndex = {};    // colonna -> {input, label} dei pulsanti "colori"
 
 /* Le selezioni salvate prima degli operatori tengono la sola lista di valori. */
 function asFilter(raw) {
@@ -176,21 +185,25 @@ function renderMetrics(groups, dflt) {
   });
 }
 
-/* Baseline: si sceglie la famiglia (PPO/SAC/TD3), disegnata in nero continuo con
-   le epoche di base. La seconda tendina aggiunge una seconda baseline nera
-   tratteggiata a epoche moltiplicate: «segui ω» usa in ogni pannello il PPO con
-   lo stesso moltiplicatore dell'ω del pannello, come nelle figure del paper. */
-const BASELINE_FAMILIES = ["PPO", "SAC", "TD3"];
+/* Baseline: si scelgono le famiglie (PPO/SAC/TD3/GePPO-original), disegnate in
+   nero con le epoche di base — se ne possono accendere piu' d'una insieme, e si
+   distinguono per tratteggio. La tendina aggiunge una baseline nera tratteggiata
+   a epoche moltiplicate: «segui ω» usa in ogni pannello il PPO con lo stesso
+   moltiplicatore dell'ω del pannello, come nelle figure del paper. */
+const BASELINE_FAMILIES = ["PPO", "SAC", "TD3", "GePPO-original"];
+const baselineIndex = {};   // famiglia -> {input, label}, per il ripristino
+
+function baselineFamilies() {
+  const fam = state.grid.baseline.family;
+  return Array.isArray(fam) ? fam : (fam ? [fam] : []);
+}
 
 function renderBaselineControls(dimensions) {
   const famDim = dimensions.find((d) => d.col === "family");
   const multDim = dimensions.find((d) => d.col === "epoch_mult");
-  const available = (famDim ? famDim.values.map((v) => v.value) : [])
-    .filter((f) => BASELINE_FAMILIES.includes(f));
-  const famSel = $("#grid-baseline");
-  famSel.innerHTML = `<option value="">nessuna</option>` +
-    available.map((f) => `<option value="${f}">${f}</option>`).join("");
-  famSel.value = state.grid.baseline.family || "";
+  const available = BASELINE_FAMILIES
+    .filter((f) => (famDim ? famDim.values.map((v) => v.value) : []).includes(f));
+  state.grid.baseline.family = baselineFamilies();
 
   // solo i moltiplicatori veri (x2, x4, x8): x1 e' gia' la baseline continua
   const mults = (multDim ? multDim.values.map((v) => v.value) : [])
@@ -203,17 +216,40 @@ function renderBaselineControls(dimensions) {
   epSel.value = state.grid.baseline.epochs || "";
 
   const syncEpochsVisibility = () => {
-    const show = famSel.value === "PPO" && mults.length > 0;
+    const show = baselineFamilies().includes("PPO") && mults.length > 0;
     $("#grid-baseline-epochs-field").hidden = !show;
     if (!show) state.grid.baseline.epochs = "";
   };
+
+  const box = $("#grid-baseline");
+  box.className = "pills";
+  box.innerHTML = "";
+  for (const key of Object.keys(baselineIndex)) delete baselineIndex[key];
+  for (const fam of available) {
+    const on = baselineFamilies().includes(fam);
+    const label = document.createElement("label");
+    label.className = "pill" + (on ? " on" : "");
+    label.innerHTML = `<input type="checkbox" value="${fam}"${on ? " checked" : ""}>` +
+      `<span>${fam}</span>`;
+    const input = label.querySelector("input");
+    baselineIndex[fam] = { input, label };
+    input.addEventListener("change", () => {
+      label.classList.toggle("on", input.checked);
+      // l'ordine delle famiglie e' quello di BASELINE_FAMILIES: cosi' il
+      // tratteggio di una baseline non cambia a seconda di come l'hai accesa
+      const cur = new Set(baselineFamilies());
+      input.checked ? cur.add(fam) : cur.delete(fam);
+      state.grid.baseline.family = BASELINE_FAMILIES.filter((f) => cur.has(f));
+      syncEpochsVisibility();
+      maybeAutoPreview();
+    });
+    box.appendChild(label);
+  }
+  if (!available.length) {
+    box.innerHTML = `<span class="hint">nessuna famiglia disponibile</span>`;
+  }
   syncEpochsVisibility();
 
-  famSel.addEventListener("change", () => {
-    state.grid.baseline.family = famSel.value;
-    syncEpochsVisibility();
-    maybeAutoPreview();
-  });
   epSel.addEventListener("change", () => {
     state.grid.baseline.epochs = epSel.value;
     maybeAutoPreview();
@@ -231,31 +267,29 @@ function renderGridControls(fields) {
       maybeAutoPreview();
     });
   }
-  const hue = $("#grid-hue");
-  hue.className = "pills";
-  hue.innerHTML = "";
-  for (const f of fields) {
-    const label = document.createElement("label");
-    label.className = "pill" + (state.grid.hue.includes(f.col) ? " on" : "");
-    label.innerHTML = `<input type="checkbox" value="${f.col}"` +
-      `${state.grid.hue.includes(f.col) ? " checked" : ""}><span>${f.title}</span>`;
-    const input = label.querySelector("input");
-    hueIndex[f.col] = { input, label };
-    input.addEventListener("change", () => {
-      label.classList.toggle("on", input.checked);
-      const cur = new Set(state.grid.hue);
-      input.checked ? cur.add(f.col) : cur.delete(f.col);
-      state.grid.hue = [...cur];
-      maybeAutoPreview();
-    });
-    hue.appendChild(label);
-  }
   $("#grid-band").addEventListener("change", (e) => {
     state.grid.band = e.target.value; maybeAutoPreview();
   });
   $("#grid-smooth").addEventListener("change", (e) => {
     state.grid.smooth = parseInt(e.target.value, 10) || 1; maybeAutoPreview();
   });
+  syncSizeInputs();
+  const onSizeChange = () => {
+    const w = parseInt($("#grid-width-px").value, 10) || DEFAULT_SIZE_PX;
+    const h = parseInt($("#grid-height-px").value, 10) || DEFAULT_SIZE_PX;
+    state.grid.panel_size = [w / PREVIEW_DPI, h / PREVIEW_DPI];
+    maybeAutoPreview();
+  };
+  $("#grid-width-px").addEventListener("change", onSizeChange);
+  $("#grid-height-px").addEventListener("change", onSizeChange);
+}
+
+/* Dimensione del pannello: la pagina la mostra in px (piu' intuitiva di
+   pollici), FigureSpec.panel_size la vuole in pollici — PREVIEW_DPI converte. */
+function syncSizeInputs() {
+  const [w, h] = state.grid.panel_size || [DEFAULT_SIZE_PX / PREVIEW_DPI, DEFAULT_SIZE_PX / PREVIEW_DPI];
+  $("#grid-width-px").value = Math.round(w * PREVIEW_DPI);
+  $("#grid-height-px").value = Math.round(h * PREVIEW_DPI);
 }
 
 /* --- query ---------------------------------------------------------------- */
@@ -263,6 +297,7 @@ function renderGridControls(fields) {
 function payload() {
   return { dims: state.dims, seeds: state.seeds, grid: state.grid,
            excluded: [...state.excluded],
+           pinned: [...state.pinned],
            series_overrides: state.series_overrides };
 }
 
@@ -278,7 +313,8 @@ async function runQuery() {
   $("#n-configs").textContent = data.n_configs;
   $("#states").innerHTML = Object.entries(data.states || {})
     .map(([k, v]) => `<span class="badge ${k}">${k}: ${v}</span>`).join("") +
-    (data.n_excluded ? `<span class="badge excluded">escluse: ${data.n_excluded}</span>` : "");
+    (data.n_excluded ? `<span class="badge excluded">escluse: ${data.n_excluded}</span>` : "") +
+    (state.pinned.size ? `<span class="badge pinned">📌 ${state.pinned.size}</span>` : "");
   state.filterArgs = data.filter_args || [];
   applyCounts(data.counts);
   renderCoverage(data.coverage);
@@ -294,16 +330,23 @@ function renderCoverage(cov) {
   }
   const maxSeeds = Math.max(...cov.rows.map((r) => r.n_seeds));
   const allOn = cov.rows.every((r) => r.on);
+  const allPinned = cov.rows.every((r) => r.pinned);
   const head =
     `<th class="pick"><input type="checkbox" id="cov-all"${allOn ? " checked" : ""}` +
     ` title="tutte / nessuna"></th>` +
+    `<th class="pin"><button id="cov-pin-all" class="pin-btn${allPinned ? " on" : ""}"` +
+    ` title="pinna tutte le presenti / spinna tutte">📌</button></th>` +
     cov.columns.map((c) => `<th>${c}</th>`).join("") +
     `<th>run</th><th>seed</th><th>quali seed</th>`;
   const body = cov.rows.map((r, i) => {
     const partial = r.n_seeds < maxSeeds;
-    const cls = [partial ? "partial" : "", r.on ? "" : "off"].filter(Boolean).join(" ");
+    const cls = [partial ? "partial" : "", r.on ? "" : "off", r.pinned ? "pinned" : ""]
+      .filter(Boolean).join(" ");
     return `<tr class="${cls}">` +
       `<td class="pick"><input type="checkbox" data-row="${i}"${r.on ? " checked" : ""}></td>` +
+      `<td class="pin"><button class="pin-btn${r.pinned ? " on" : ""}" data-pin="${i}"` +
+      ` title="${r.pinned ? "spinna: torna a seguire i filtri" :
+                 "pinna: resta nel grafico anche cambiando i filtri"}">📌</button></td>` +
       r.cells.map((c) => `<td>${c}</td>`).join("") +
       `<td class="num">${r.n_runs}</td>` +
       `<td class="num seeds-missing">${r.n_seeds}</td>` +
@@ -322,6 +365,23 @@ function renderCoverage(cov) {
   }
   $("#cov-all").addEventListener("change", (e) => {
     for (const row of cov.rows) setRow(row, e.target.checked);
+    runQuery();
+  });
+
+  // pin: una riga e' pinnata solo se lo sono tutte le sue run; il pulsante in
+  // testata pinna tutte le righe presenti, o le spinna se lo sono gia' tutte
+  const setPin = (row, on) => {
+    for (const id of row.run_ids) on ? state.pinned.add(id) : state.pinned.delete(id);
+  };
+  for (const btn of box.querySelectorAll("button[data-pin]")) {
+    btn.addEventListener("click", () => {
+      const row = cov.rows[Number(btn.dataset.pin)];
+      setPin(row, !row.pinned);
+      runQuery();
+    });
+  }
+  $("#cov-pin-all").addEventListener("click", () => {
+    for (const row of cov.rows) setPin(row, !allPinned);
     runQuery();
   });
 
@@ -367,10 +427,12 @@ async function runPreview() {
 
 /* --- ritocchi alle serie -------------------------------------------------- */
 
-/* Nome e colore di una serie, scelti a mano qui e applicati in tutti i pannelli.
-   Restano nella selezione (quindi anche nel .tex esportato); per renderli
-   permanenti si copia la regola [[series]] e la si incolla in style.toml.
-   La chiave e' sempre l'etichetta di partenza: rinominare non la cambia. */
+/* Nome, colore e tratteggio di una serie, scelti a mano qui e applicati in
+   tutti i pannelli — vale sia per le curve normali sia per le baseline (nere
+   per convenzione, ma anche loro ritoccabili). Restano nella selezione (quindi
+   anche nel .tex esportato); per renderli permanenti si copia la regola
+   [[series]] e la si incolla in style.toml. La chiave e' sempre l'etichetta di
+   partenza: rinominare non la cambia. */
 function renderSeries(items, palette) {
   state.series = items;
   state.palette = palette;
@@ -383,7 +445,8 @@ function renderSeries(items, palette) {
     el.className = "series-item" + (state.seriesSel === s.key ? " on" : "");
     el.innerHTML = `<span class="swatch" style="background:${esc(s.color)}"></span>` +
       `<span class="series-name">${esc(s.label)}</span>` +
-      (s.renamed || s.recolored ? `<span class="badge tweak">ritoccata</span>` : "");
+      (s.renamed || s.recolored || s.restyled
+        ? `<span class="badge tweak">ritoccata</span>` : "");
     el.addEventListener("click", () => {
       state.seriesSel = state.seriesSel === s.key ? null : s.key;
       renderSeries(items, palette);
@@ -398,6 +461,7 @@ function renderSeriesEdit() {
   $("#series-edit").hidden = !chosen;
   if (!chosen) return;
   $("#series-name").value = chosen.label;
+  $("#series-style").value = chosen.style || "solid";
   const box = $("#series-palette");
   box.innerHTML = "";
   for (const color of state.palette || []) {
@@ -577,11 +641,13 @@ async function deleteSelection(slug) {
    sono gia' state convertite dal server, quindi `spec` c'e' sempre. */
 function gridFromSpec(spec) {
   const out = {};
-  for (const k of ["rows", "cols", "band", "smooth", "metric"]) {
+  for (const k of ["rows", "cols", "band", "smooth", "metric", "panel_size"]) {
     if (spec[k] !== undefined && spec[k] !== null) out[k] = spec[k];
   }
   out.hue = spec.hue || [];
-  out.baseline = { family: (spec.baseline || {}).family || "",
+  // le selezioni vecchie hanno una famiglia sola come stringa
+  const fam = (spec.baseline || {}).family;
+  out.baseline = { family: Array.isArray(fam) ? fam : (fam ? [fam] : []),
                    epochs: (spec.baseline || {}).epochs || "" };
   return out;
 }
@@ -591,6 +657,7 @@ function applySelection(entry) {
   for (const [col, raw] of Object.entries(entry.dims || {})) state.dims[col] = asFilter(raw);
   state.seeds = entry.seeds || { min: null, max: null };
   state.excluded = new Set(entry.excluded || []);
+  state.pinned = new Set(entry.pinned || []);
   state.series_overrides = entry.series_overrides || (entry.spec || {}).series_overrides || {};
   state.seriesSel = null;
   state.grid = { ...state.grid, ...gridFromSpec(entry.spec || {}) };
@@ -600,19 +667,20 @@ function applySelection(entry) {
   $("#seed-min").value = state.seeds.min ?? state.meta.seed_min;
   $("#seed-max").value = state.seeds.max ?? state.meta.seed_max;
   $("#grid-metric").value = state.grid.metric || "eval/mean_reward";
+  syncSizeInputs();
   $("#grid-rows").value = state.grid.rows || "";
   $("#grid-cols").value = state.grid.cols || "";
-  $("#grid-band").value = state.grid.band || "se";
+  $("#grid-band").value = state.grid.band || "ci95";
   $("#grid-smooth").value = state.grid.smooth || 5;
   // ripristino senza dispatch: un evento qui rilancerebbe l'anteprima a meta' setup
-  state.grid.baseline = state.grid.baseline || { family: "", epochs: "" };
-  $("#grid-baseline").value = state.grid.baseline.family || "";
-  $("#grid-baseline-epochs-field").hidden = state.grid.baseline.family !== "PPO";
-  $("#grid-baseline-epochs").value = state.grid.baseline.epochs || "";
-  for (const [col, ref] of Object.entries(hueIndex)) {
-    ref.input.checked = (state.grid.hue || []).includes(col);
+  state.grid.baseline = state.grid.baseline || { family: [], epochs: "" };
+  state.grid.baseline.family = baselineFamilies();
+  for (const [fam, ref] of Object.entries(baselineIndex)) {
+    ref.input.checked = state.grid.baseline.family.includes(fam);
     ref.label.classList.toggle("on", ref.input.checked);
   }
+  $("#grid-baseline-epochs-field").hidden = !state.grid.baseline.family.includes("PPO");
+  $("#grid-baseline-epochs").value = state.grid.baseline.epochs || "";
   runQuery();
 }
 
@@ -627,6 +695,7 @@ function reset() {
   state.dims = {};
   state.seeds = { min: null, max: null };
   state.excluded.clear();
+  state.pinned.clear();
   state.series_overrides = {};
   state.seriesSel = null;
   for (const col of Object.keys(pillIndex)) syncPills(col);
@@ -664,6 +733,9 @@ async function init() {
   // ogni tasto vorrebbe dire una figura per lettera
   $("#series-name").addEventListener("change", (e) => {
     if (state.seriesSel) tweakSeries(state.seriesSel, { name: e.target.value });
+  });
+  $("#series-style").addEventListener("change", (e) => {
+    if (state.seriesSel) tweakSeries(state.seriesSel, { style: e.target.value });
   });
   $("#export-jpeg").addEventListener("click", () => exportFigure("jpeg"));
   $("#export-latex").addEventListener("click", () => exportFigure("tex"));

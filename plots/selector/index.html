@@ -77,22 +77,26 @@
         <label class="field narrow"><span>smooth</span>
           <input type="number" id="grid-smooth" value="5" min="1" max="30">
         </label>
-        <label class="field"><span>baseline</span>
-          <select id="grid-baseline">
-            <option value="">nessuna</option>
-          </select>
-        </label>
+        <div class="field">
+          <span>dimensione (px)</span>
+          <div class="size-px">
+            <input type="number" id="grid-width-px" min="40" max="2000" step="10">
+            <span>×</span>
+            <input type="number" id="grid-height-px" min="40" max="2000" step="10">
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar baseline-row">
+        <div class="field"><span>baseline</span>
+          <div id="grid-baseline" class="pills pills-mono"></div>
+        </div>
         <label class="field" id="grid-baseline-epochs-field" hidden>
           <span>2ª baseline (tratteggiata)</span>
           <select id="grid-baseline-epochs"></select>
         </label>
       </div>
 
-      <div class="hue-row">
-        <span class="field-label">colori</span>
-        <div id="grid-hue"></div>
-      </div>
-      <p class="hint hue-hint">vuoto = automatico: una curva per ogni configurazione che varia</p>
       <div id="preview-box"><p class="placeholder">Premi «Aggiorna» per disegnare l'anteprima.</p></div>
 
       <div id="series-box" hidden>
@@ -106,6 +110,14 @@
             <input type="text" id="series-name" autocomplete="off">
           </label>
           <div class="field wide"><span>colore</span><div id="series-palette"></div></div>
+          <label class="field"><span>tratteggio</span>
+            <select id="series-style">
+              <option value="solid">continua</option>
+              <option value="dashed">tratteggiata</option>
+              <option value="dashdot">tratto-punto</option>
+              <option value="dotted">punteggiata</option>
+            </select>
+          </label>
           <div class="head-actions">
             <button id="series-reset" class="ghost small">Ripristina</button>
             <button id="series-rule" class="ghost small">Copia regola per style.toml</button>

@@ -27,7 +27,9 @@ def add_selection_args(p):
                    help="usa la selezione salvata dal selettore interattivo "
                         f"(senza argomento: {SELECTION_JSON})")
     g.add_argument("--baseline", nargs="*", default=[],
-                   help="filtri per la baseline (disegnata in nero in ogni pannello)")
+                   help="filtri per le baseline (disegnate in nero in ogni pannello); "
+                        "piu' famiglie insieme si scrivono con la virgola, es. "
+                        "family=PPO,GePPO-original — una per tratteggio")
     g.add_argument("--baseline-epochs", default=None,
                    help="seconda baseline tratteggiata a epoche moltiplicate: "
                         "un numero (2|4|8) o 'follow_window' (segue l'ω del pannello)")

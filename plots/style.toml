@@ -29,8 +29,13 @@ width = 1.4                  # spessore di default (le regole [[series]] lo sovr
 band_alpha = 0.18            # opacità della banda sui seed
 band = "se"                  # se | std | ci95 | iqr | minmax | none
 smooth = 5                   # finestra della media mobile, 0 = curve grezze
-baseline_color = "#000000"   # PPO/SAC/TD3: nel paper sono sempre nere
+baseline_color = "#000000"   # PPO/SAC/TD3/GePPO-orig: nel paper sono sempre nere
 baseline_width = 1.6
+# con piu' baseline insieme il colore non le distingue: la prima è continua, le
+# altre prendono questi tratteggi in ordine (solid | dashed | dotted | dashdot;
+# "dashed" resta alla 2ª baseline a epoche moltiplicate). Ritoccabili anche
+# dall'anteprima, come nome e colore.
+baseline_styles = ["solid", "dashdot", "dotted"]
 
 
 # ── Legenda ───────────────────────────────────────────────────────────────────
@@ -79,6 +84,13 @@ color = "#FFB000"
 style = "solid"
 name  = 'GePPO'
 latex = '\geppo'
+
+[[series]]
+match = { family = "GePPO-original" }
+color = "#FFB000"
+style = "dashed"
+name  = 'GePPO-orig'
+latex = '\geppoorig'
 
 [[series]]
 match = { family = "RT-PPO", is_type = "N" }
@@ -134,6 +146,7 @@ preamble = '\usepackage{pgfplots,amsmath}  \pgfplotsset{compat=1.18}'
 macros = [
   '\newcommand{\ppo}{\mathtt{PPO}}',
   '\newcommand{\geppo}{\mathtt{GePPO}}',
+  '\newcommand{\geppoorig}{\mathtt{GePPO\text{-}orig}}',
   '\newcommand{\uppo}{\omega\mathtt{PPO\text{-}U}}',
   '\newcommand{\bhppo}{\omega\mathtt{PPO\text{-}BH}}',
   '\newcommand{\sac}{\mathtt{SAC}}',

@@ -28,6 +28,22 @@ from ..index import load_index  # noqa: E402
 from ..paths import OUTPUT_DIR, PLOTS_ROOT, SELECTION_JSON  # noqa: E402
 from . import api  # noqa: E402
 
+# progetti fuori dal selettore web (restano nell'indice, disponibili da CLI
+# con --filter project=...): "rebuttal" e' superata da rt-ppo-ablations, tranne
+# le baseline SAC/TD3 che stanno solo li'.
+SITE_HIDDEN_PROJECTS = {"rebuttal"}
+SITE_HIDDEN_EXCEPT_FAMILIES = {"rebuttal": {"SAC", "TD3"}}
+
+
+def site_index():
+    """L'indice come lo vede il sito: senza i progetti nascosti (con eccezioni)."""
+    df = load_index()
+    hidden = df.project.isin(SITE_HIDDEN_PROJECTS)
+    for project, families in SITE_HIDDEN_EXCEPT_FAMILIES.items():
+        hidden &= ~((df.project == project) & df.family.isin(families))
+    return df[~hidden]
+
+
 STATIC_DIR = PLOTS_ROOT / "selector"
 STATIC = {
     "/": ("index.html", "text/html"),
@@ -84,7 +100,7 @@ def _export_tex(df, payload: dict, sub, name: str) -> dict:
 
 
 def _export(df, payload: dict) -> dict:
-    sub = api.apply_ui_filters(df, payload)
+    sub = api.selected_runs(df, payload)
     if sub.empty:
         return {"error": "Nessuna run selezionata."}
     fmt = (payload.get("format") or "jpeg").lower()
@@ -198,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             name, ctype = STATIC[path]
             return self._send(200, (STATIC_DIR / name).read_bytes(), ctype)
         if path == "/api/dimensions":
-            return self._json(api.dimensions(load_index()))
+            return self._json(api.dimensions(site_index()))
         if path == "/api/selections":
             return self._json({"items": selection.listing()})
         return self._send(404, b"not found", "text/plain")
@@ -213,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(n) or b"{}")
             # l'indice viene riletto a ogni richiesta: dopo un build_index.py le
             # run nuove compaiono senza riavviare il server
-            return self._json(handler(load_index(), payload))
+            return self._json(handler(site_index(), payload))
         except Exception as exc:  # errore visibile nella pagina, server vivo
             import traceback
             traceback.print_exc()

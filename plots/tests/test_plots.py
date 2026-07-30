@@ -165,6 +165,17 @@ def test_spec_round_trip():
     assert back.baseline.family == "PPO" and back.baseline.epochs == "follow_window"
 
 
+def test_baseline_piu_famiglie_insieme():
+    """`family` accetta l'elenco nuovo e la stringa delle selezioni vecchie."""
+    spec = FigureSpec()
+    spec.baseline.family = ["PPO", "GePPO-original"]
+    back = FigureSpec.from_dict(spec.to_dict())
+    assert back.baseline.families() == ["PPO", "GePPO-original"]
+    assert back.baseline.active()
+    assert FigureSpec.from_dict({"baseline": "PPO"}).baseline.families() == ["PPO"]
+    assert not FigureSpec.from_dict({"baseline": {"family": []}}).baseline.active()
+
+
 def test_migrazione_selezione_v1(tmp_path):
     vecchia = {
         "name": "prova", "slug": "prova", "saved_at": "2026-07-27T14:10:00",
@@ -196,8 +207,10 @@ def test_query_conta_run_configurazioni_e_copertura():
     assert res["n_configs"] == 2                     # N e BH
     assert res["filter_args"] == ["family=RT-PPO"]
     assert "IS" in res["coverage"]["columns"]
+    # i conteggi contano configurazioni (non run): PPO ha 2 config (epoch_mult
+    # 1 e 2), ciascuna con 2 seed che qui non vanno raddoppiati
     # i conteggi di una dimensione ignorano i filtri di quella dimensione
-    assert res["counts"]["family"]["PPO"] == 4
+    assert res["counts"]["family"]["PPO"] == 2
 
 
 def test_operatori_dei_filtri():
@@ -228,11 +241,11 @@ def test_filtri_negativi_tradotti_in_sintassi_cli():
 def test_conteggi_di_un_operatore_negativo_dicono_quanto_resta_escludendo():
     df = make_index()
     counts = api.query(df, {"dims": {"family": {"op": "not_in", "values": []}}})["counts"]
-    # 8 run in tutto: escludendo PPO (4 run) ne restano 4
-    assert counts["family"]["PPO"] == 4
+    # 4 configurazioni in tutto: escludendo PPO (2 config) ne restano 2
+    assert counts["family"]["PPO"] == 2
     positivi = api.query(df, {"dims": {}})["counts"]
-    assert positivi["family"]["PPO"] == 4      # per caso coincide: 4 con, 4 senza
-    assert positivi["is_type"]["N"] == 2 and positivi["is_type"]["BH"] == 2
+    assert positivi["family"]["PPO"] == 2      # per caso coincide: 2 con, 2 senza
+    assert positivi["is_type"]["N"] == 1 and positivi["is_type"]["BH"] == 1
 
 
 def test_query_senza_filtri_non_elenca_filtri():

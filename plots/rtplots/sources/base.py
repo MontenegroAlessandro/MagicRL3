@@ -35,6 +35,9 @@ class RunSource:
 
     name: str                                   # valore della colonna `source`
     projects: dict[str, str] = field(default_factory=dict)   # progetto -> env atteso
+    # tag che assegnano una run a questa fonte anche se il progetto e' di
+    # un'altra: serve dove convenzioni diverse convivono nello stesso progetto
+    claim_tags: frozenset[str] = frozenset()
     # tag -> setting, per le fonti che non usano i tag setting1/2/3
     setting_tags: dict[str, int] = field(default_factory=dict)
     # tag che marcano run fuori dai sottospazi di STATUS_EXP
