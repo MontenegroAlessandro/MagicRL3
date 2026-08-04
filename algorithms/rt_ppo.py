@@ -127,6 +127,24 @@ class RT_PPO(PPO):
 
         return ratio
 
+    def _current_ratio(self, data) -> th.Tensor:
+        """
+        The IS ratio the loss multiplies the advantages by, evaluated at the current policy
+        on the samples of `data`: r = pi_k/pi_{k-i} (naive) or pi_k/mean_j pi_{k-j} (BH),
+        since it is called before any gradient step. With naive weighting it is exactly 1 on
+        window 0, whose samples pi_k collected itself; with BH weighting it is not.
+        """
+        actions = data.actions
+        if isinstance(self.action_space, spaces.Discrete):
+            actions = actions.long().flatten()
+        was_training = self.policy.training
+        self.policy.set_training_mode(False)
+        with th.no_grad():
+            _, log_prob, _ = self.policy.evaluate_actions(data.observations, actions)
+            ratio = self._compute_ratio(log_prob, data)
+        self.policy.set_training_mode(was_training)
+        return ratio
+
     # ------------------------------------------------------------------ #
     # diagnostics: no impact on the algorithm, only on what gets logged   #
     # ------------------------------------------------------------------ #
@@ -284,16 +302,25 @@ class RT_PPO(PPO):
 
         # Advantage normalization statistics, computed once on the whole buffer.
         # With fresh advantages every window is estimated under the current critic, so all of
-        # them share a single (mu, sigma); with stale ones each window gets its own, since it
-        # carries the offset and the scale of the critic that produced it.
+        # them share a single (mu, sigma), but the samples come from pi_{k-i}, so it is the
+        # IS-weighted one; with stale advantages each window gets its own, since it carries
+        # the offset and the scale of the critic that produced it.
         n_windows = 1 + len(self.rollout_buffer.history)
         adv_mean_by_window = adv_std_by_window = None
         if self.normalize_advantage:
             all_data = next(self.rollout_buffer.get(batch_size=None))  # the whole buffer in one batch
             all_advantages, all_windows = all_data.advantages, all_data.window_id.long()
             if self.fresh_adv:
-                adv_mean_by_window = all_advantages.mean().repeat(n_windows)
-                adv_std_by_window = (all_advantages.std() + 1e-8).repeat(n_windows)
+                # Each sample enters the loss multiplied by its ratio, so the moments of the
+                # objective are the self-normalized IS ones. Weights and advantages come from
+                # the same pass: get() reshuffles at every call, pairing two passes would
+                # match each weight with the wrong sample.
+                weights = self._current_ratio(all_data)
+                total_weight = weights.sum()
+                mean = (weights * all_advantages).sum() / total_weight
+                var = (weights * (all_advantages - mean) ** 2).sum() / total_weight
+                adv_mean_by_window = mean.repeat(n_windows)
+                adv_std_by_window = (var.sqrt() + 1e-8).repeat(n_windows)
             else:
                 adv_mean_by_window = th.stack([all_advantages[all_windows == i].mean() for i in range(n_windows)])
                 adv_std_by_window = th.stack([all_advantages[all_windows == i].std() + 1e-8 for i in range(n_windows)])
