@@ -98,7 +98,6 @@ class RunSource:
             opc=as_bool(exp.get("on_policy_critic")),
             adaptive_lr=as_bool(exp.get("adaptive_lr")),
             sampling=self.sampling(exp),
-            seq=as_bool(exp.get("sequential_window_training")),
             n_steps=n_steps,
             batch_size=batch_size,
             n_minibatch=n_minibatch,

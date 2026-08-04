@@ -14,7 +14,7 @@ Scelte di mappatura, decise a mano:
     griglia 1/2/3, quindi non si deduce niente;
   - `ablation = "geppo_original"`: stanno fuori dai sottospazi di STATUS_EXP,
     percio' `ablation=none` continua a isolare P1+P2+B2+B3 come prima;
-  - `fresh_adv`, `opc`, `sampling`, `seq`, `is_type` restano vuoti: nella
+  - `fresh_adv`, `opc`, `sampling`, `is_type` restano vuoti: nella
     codebase originale non esistono come opzioni, e un valore inventato
     sarebbe indistinguibile da uno vero.
 
@@ -66,7 +66,6 @@ class GePPOOriginalSource(RunSource):
             opc=None,
             adaptive_lr=as_bool(cfg.get("ac_kwargs/adapt_lr")),
             sampling=None,
-            seq=None,
             n_steps=n_steps,
             batch_size=batch_size,
             n_minibatch=n_minibatch,

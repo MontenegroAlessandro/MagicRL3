@@ -82,6 +82,9 @@ def curve_from_npz(path: str | Path, field: str = "results") -> pd.DataFrame:
         "step": data["timesteps"].astype(float),
         "ret": values.mean(axis=1),
         "ret_std_eps": values.std(axis=1),
+        # quanti episodi stanno dietro a ogni punto: serve a separare il rumore
+        # dello stimatore dall'instabilita' vera (vedi summary.instability)
+        "n_eps": float(values.shape[1]),
     })
 
 

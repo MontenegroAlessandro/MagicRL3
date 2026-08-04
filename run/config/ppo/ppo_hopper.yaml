@@ -54,7 +54,6 @@ experiment:
   window_size: 1
   on_policy_critic: true
   weight_type: naive
-  sequential_window_training: false
   fresh_adv: false
   batch_sampling: balanced
   on_policy_masking: false

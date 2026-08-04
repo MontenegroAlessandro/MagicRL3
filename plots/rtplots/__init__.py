@@ -4,6 +4,7 @@
   sources    quali progetti W&B esistono e con che convenzioni si leggono
   index      metadati delle run (una riga per run), in cache su /storage
   curves     curve di eval/diagnostiche e aggregazione sui seed
+  summary    AUC, prestazione finale e instabilita' di una curva di eval
   select     filtri in stile riga di comando
   figure     dalla selezione alla figura: pipeline unica di CLI e selettore
   selection  selezioni salvate dal selettore (lettura, scrittura, migrazione)
@@ -13,7 +14,7 @@
   webui      il selettore interattivo
 """
 from . import (curves, figure, index, labels, paths, schema, select, selection,
-               sources, style)  # noqa: F401
+               sources, style, summary)  # noqa: F401
 
 __all__ = ["curves", "figure", "index", "labels", "paths", "schema", "select",
-           "selection", "sources", "style"]
+           "selection", "sources", "style", "summary"]

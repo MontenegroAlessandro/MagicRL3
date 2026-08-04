@@ -43,6 +43,15 @@ METRIC_GROUPS = [
         ("diagnostics_abs_ratio/final_mean", "|ratio| medio", "Mean |ratio|", "wandb", None),
         ("debug/rollout_trajectories", "Traiettorie per rollout", "Trajectories", "wandb", None),
     ]),
+    ("Diagnostiche advantage", [
+        ("diagnostics_adv/adv_mean_mean", "Media degli advantage", "Advantage Mean", "wandb", None),
+        ("diagnostics_adv/adv_std_mean", "Std degli advantage", "Advantage Std", "wandb", None),
+        # solo con fresh_adv: confronto fra advantage stale e ricalcolati, come
+        # entrano nel gradiente (ognuno con la propria normalizzazione)
+        ("diagnostics_adv/sign_flip_mean", "Sign flip degli advantage",
+         "Sign Flip Fraction", "wandb", None),
+        ("diagnostics_adv/spearman_mean", "Spearman stale/fresh", "Spearman", "wandb", None),
+    ]),
 ]
 
 METRICS = {

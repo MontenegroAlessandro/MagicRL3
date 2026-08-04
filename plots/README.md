@@ -19,6 +19,7 @@ plots/
 │   ├── paths.py        percorsi (cache in /storage, output in plots/output)
 │   ├── index.py        indice dei run: metadati W&B -> parquet in cache
 │   ├── curves.py       curve di eval (evaluations.npz locali, fallback W&B) + aggregazione
+│   ├── summary.py      AUC, prestazione finale, instabilità: una riga per run
 │   ├── select.py       filtri e conteggi di copertura
 │   ├── figure.py       FigureSpec + pipeline unica: selezione -> figura
 │   ├── tikz.py         export .tex (pgfplots), un file per pannello
@@ -193,7 +194,7 @@ invece di stare sotto `experiment`. `family = GePPO-original`,
 `window = runner_kwargs/M`, `setting` vuoto (configurazioni tunate, fuori dalla
 griglia 1/2/3), `ablation = geppo_original` — quindi `ablation=none` continua a
 isolare P1+P2+B2+B3 e le figure esistenti non cambiano. `fresh_adv`, `opc`,
-`sampling`, `seq`, `is_type` restano vuoti: nella codebase originale non esistono
+`sampling`, `is_type` restano vuoti: nella codebase originale non esistono
 come opzioni. Nessun `.npz` locale: le curve vengono dalla history W&B.
 
 Tutto ciò che distingue una fonte dall'altra sta in `rtplots/sources/`: un file
@@ -275,12 +276,31 @@ catalogo, definito in `rtplots/metrics.py`:
 | Rollout | `rollout/ep_rew_mean`, `time/fps` | W&B |
 | Ottimizzazione | loss, clip fraction, explained variance, learning rate | W&B |
 | Diagnostiche IS | KL, ESS, varianza dei ratio, `|ratio|` medio | W&B |
+| Diagnostiche advantage | media/std degli advantage, sign flip e Spearman stale↔fresh | W&B |
 
 `python plots/scripts/plot_curves.py --list-metrics` stampa l'elenco completo;
 qualsiasi altra chiave loggata su W&B è comunque accettata. Le metriche W&B
 costano una richiesta per run: vengono scaricate in parallelo e messe in cache su
 disco, quindi solo la prima volta è lenta (nel selettore c'è un tetto per evitare
 attese di minuti su selezioni enormi).
+
+## Metriche riassuntive (una riga per run)
+
+`rtplots/summary.py` riduce ogni curva di eval a tre numeri, calcolati **per run**
+e poi mediati sui seed. Le run di uno stesso gruppo vengono prima troncate
+all'orizzonte comune, altrimenti si confrontano AUC su intervalli diversi.
+
+```python
+from rtplots.summary import summarize
+agg, per_run = summarize(curves, index, ["family", "window", "is_type"])
+```
+
+| metrica | definizione | note |
+|---|---|---|
+| `auc` | media della curva pesata sui timestep (trapezio / orizzonte) | ritorno medio lungo il training: premia chi sale prima; nelle unità del ritorno, quindi si confronta a parità di env |
+| `final` | media degli ultimi `last_n` punti di eval (default 10) | «ultimi 10 punti» dipende da `eval_freq`: con `eval_freq` diversi usare `curves.final_performance` (ultima frazione di curva) |
+| `instability` | RMSE fra la curva e la sua media mobile centrata (ampiezza `smooth_frac` dell'orizzonte, definita in timestep) | `instability_rel` = RMSE / media: adimensionale, è quella da usare fra env diversi |
+| `instability_net` | come sopra, tolto il rumore dello stimatore (varianza fra gli episodi / `n_eps`) | resta l'oscillazione vera della policy; serve il `.npz` locale, altrimenti NaN |
 
 ## Filtri
 
@@ -295,7 +315,7 @@ Ogni script accetta `--filter chiave=valore …` (in AND):
 | `opc=false` | booleani |
 
 Colonne disponibili: `family` (PPO/RT-PPO/GePPO/SAC/TD3), `env`, `window`, `setting`,
-`is_type` (N/BH), `opc`, `fresh_adv`, `adaptive_lr`, `sampling`, `seq`, `seed`,
+`is_type` (N/BH), `opc`, `fresh_adv`, `adaptive_lr`, `sampling`, `seed`,
 `n_steps`, `batch_size`, `n_minibatch`, `n_epochs`, `epoch_mult`, `clip_range`,
 `lr`, `gamma`, `total_timesteps`, `campaign`, `state`, `tags`,
 `source` (wandb/paper), `project`, `ablation`.

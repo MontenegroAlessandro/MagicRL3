@@ -14,13 +14,14 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rtplots import labels as L  # noqa: E402
-from rtplots import rules, schema, selection, tikz  # noqa: E402
+from rtplots import rules, schema, selection, summary, tikz  # noqa: E402
 from rtplots.figure import (FigureSpec, Series, _apply_overrides,  # noqa: E402
                             auto_hue, merged_dims, split_panels)
 from rtplots.sources import current, paper  # noqa: E402
@@ -42,7 +43,7 @@ def make_index() -> pd.DataFrame:
                 source="wandb", ablation=None, campaign="c1", env="Hopper-v5",
                 family=family, window=window, setting=1.0, is_type=is_type,
                 opc=True, fresh_adv=False, adaptive_lr=False, sampling="balanced",
-                seq=False, epoch_mult=epoch_mult, seed=seed, n_epochs=10,
+                epoch_mult=epoch_mult, seed=seed, n_epochs=10,
                 total_timesteps=1e6,
             ))
     return pd.DataFrame(rows)
@@ -466,6 +467,80 @@ def test_tikzplotlib_importabile_con_gli_alias():
     if importlib.util.find_spec("tikzplotlib") is None:
         pytest.skip("tikzplotlib non installato")
     assert tikz.unavailable_reason() is None
+
+
+# --- metriche riassuntive delle curve ---------------------------------------
+
+def make_curves(n_points: int = 100, noise: float = 0.0, seed: int = 0,
+                run_ids=("RT-PPO-N-1-1", "RT-PPO-N-1-2"), horizon: float = 1e6):
+    """Curve finte: una rampa da 0 a 100 piu' rumore, stessa forma per ogni run."""
+    rng = np.random.default_rng(seed)
+    step = np.linspace(0, horizon, n_points)
+    frames = []
+    for run_id in run_ids:
+        ret = np.linspace(0, 100, n_points) + rng.normal(0, noise, n_points)
+        frames.append(pd.DataFrame({"run_id": run_id, "step": step, "ret": ret}))
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_auc_di_una_rampa_e_il_valore_medio():
+    # rampa 0 -> 100: il ritorno medio pesato sui timestep e' 50
+    curves = make_curves(noise=0.0)
+    per_run = summary.per_run_metrics(curves, make_index(), ["family"])
+    got = per_run[per_run.run_id.str.startswith("RT-PPO")]["auc"]
+    assert np.allclose(got, 50.0, atol=0.5)
+
+
+def test_final_media_degli_ultimi_punti_non_dell_ultimo():
+    curves = make_curves(n_points=100, noise=0.0)
+    per_run = summary.per_run_metrics(curves, make_index(), ["family"], last_n=10)
+    # media degli ultimi 10 punti di una rampa 0..100 con 100 punti
+    expected = np.linspace(0, 100, 100)[-10:].mean()
+    assert np.allclose(per_run["final"], expected, atol=1e-9)
+
+
+def test_instabilita_zero_su_una_curva_liscia_e_cresce_col_rumore():
+    liscia = summary.per_run_metrics(make_curves(noise=0.0), make_index(), ["family"])
+    rumorosa = summary.per_run_metrics(make_curves(noise=5.0, seed=1), make_index(), ["family"])
+    assert liscia["instability"].max() < 1e-9
+    assert rumorosa["instability"].min() > 1.0
+    # adimensionale: la rampa ha media 50, quindi rel ~ instability/50
+    assert np.allclose(rumorosa["instability_rel"], rumorosa["instability"] / 50, atol=0.05)
+
+
+def test_instabilita_netta_toglie_il_rumore_dello_stimatore():
+    # tutta l'oscillazione e' rumore dello stimatore: la parte netta va a zero
+    curves = make_curves(noise=5.0, seed=2)
+    curves["ret_std_eps"] = 5.0 * np.sqrt(50.0)   # std fra episodi
+    curves["n_eps"] = 50.0
+    per_run = summary.per_run_metrics(curves, make_index(), ["family"])
+    assert (per_run["instability_net"] < per_run["instability"]).all()
+    assert per_run["instability_net"].max() < 2.0
+
+
+def test_orizzonte_comune_dentro_il_gruppo():
+    # una run finisce a meta': il gruppo si tronca li' per tutte
+    corta = make_curves(run_ids=("RT-PPO-N-1-1",), horizon=5e5)
+    lunga = make_curves(run_ids=("RT-PPO-N-1-2",), horizon=1e6)
+    per_run = summary.per_run_metrics(pd.concat([corta, lunga]), make_index(), ["family"])
+    sel = per_run[per_run.run_id.isin(["RT-PPO-N-1-1", "RT-PPO-N-1-2"])]
+    assert set(sel["t_end"]) == {5e5}
+    # troncata alla stessa finestra temporale, la rampa piu' lenta arriva piu' in basso
+    assert sel.set_index("run_id").loc["RT-PPO-N-1-2", "final"] < 60
+
+
+def test_summarize_media_sui_seed_e_conta_le_run():
+    agg, per_run = summary.summarize(make_curves(noise=1.0, seed=3), make_index(), ["family"])
+    riga = agg[agg.family == "RT-PPO"].iloc[0]
+    assert riga["n_seeds"] == 2
+    assert np.isclose(riga["auc"], per_run[per_run.family == "RT-PPO"]["auc"].mean())
+    assert riga["auc_se"] <= riga["auc_std"]
+
+
+def test_summarize_su_selezione_vuota_non_esplode():
+    vuoto = pd.DataFrame(columns=["run_id", "step", "ret"])
+    agg, per_run = summary.summarize(vuoto, make_index(), ["family"])
+    assert agg.empty and per_run.empty
 
 
 if __name__ == "__main__":

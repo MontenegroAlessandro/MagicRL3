@@ -13,7 +13,7 @@ Colonne prodotte:
   run_id, name, group, state, tags, created_at, campaign, dir_name,
   project, source, ablation,
   family (PPO|RT-PPO|GePPO|SAC|TD3), env, seed, window, is_type (N|BH),
-  setting (1|2|3), fresh_adv, opc, adaptive_lr, sampling, seq,
+  setting (1|2|3), fresh_adv, opc, adaptive_lr, sampling,
   n_steps, batch_size, n_minibatch, lr, gamma, total_timesteps, eval_freq,
   n_epochs, epoch_mult, clip_range
 """

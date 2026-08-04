@@ -38,21 +38,13 @@ def main(cfg: DictConfig):
             exp.weight_type = "naive" # it uses naive weighting
             exp.geppo_clip = True # it uses a specific way of clipping
             exp.adaptive_lr = True # Alg. 1: eta adapted from the realized TV estimate
-        elif not exp.sequential_window_training and not exp.fresh_adv:
+        elif not exp.fresh_adv:
             # base_name = f"RT-PPO w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
             weight = "BH" if exp.weight_type == "bh" else "N"
             base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size}) opc={exp.on_policy_critic}"
-        elif exp.sequential_window_training and not exp.fresh_adv:
-            # base_name = f"RT-PPO SEQ w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
-            weight = "BH-S" if exp.weight_type == "bh" else "N-S"
-            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size}) opc={exp.on_policy_critic}"
-        elif not exp.sequential_window_training and exp.fresh_adv:
+        else:
             # base_name = f"RT-PPO FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
             weight = "BH-Ftr" if exp.weight_type == "bh" else "N-Ftr"
-            base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size}) opc={exp.on_policy_critic}"
-        else:
-            # base_name = f"RT-PPO SEQ FRESH w={exp.window_size} envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} on_policy_critic={exp.on_policy_critic} weight_type={exp.weight_type} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
-            weight = "BH-SF" if exp.weight_type == "bh" else "N-SF"
             base_name = f"{weight} w={exp.window_size} (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size}) opc={exp.on_policy_critic}"
     else:
         # base_name = f"PPO envs={exp.n_envs} steps={exp.n_steps} epochs={exp.n_epochs} kl_target={exp.target_kl} n_minibatch={n_minibatch_effective} batch_size={batch_size}"
@@ -138,7 +130,6 @@ def main(cfg: DictConfig):
                 batch_sampling=exp.batch_sampling
             ),
             is_weight_type=exp.weight_type,
-            sequential_window_training=exp.sequential_window_training,
             fresh_adv=exp.fresh_adv,
             on_policy_masking=exp.on_policy_masking,
             geppo_clip=exp.geppo_clip,
