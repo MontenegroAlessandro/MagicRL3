@@ -15,8 +15,8 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedul
 from stable_baselines3.common.utils import FloatSchedule, explained_variance
 from stable_baselines3 import PPO
 
-from .adaptive_lr import AdaptiveLRScheduler
-from .diagnostics import (
+from .utils.adaptive_lr import AdaptiveLRScheduler
+from .utils.diagnostics import (
     Ratios,
     advantages_by_window,
     approx_kl,

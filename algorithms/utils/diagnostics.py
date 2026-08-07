@@ -49,6 +49,22 @@ class Ratios:
 # statistics of a set of ratios r (1-D tensor)                                 #
 # --------------------------------------------------------------------------- #
 
+def compute_naive_ratios(policy, rollout_data, action_space) -> th.Tensor:
+    """Compute pi(a|s) / mu(a|s) for every sample in rollout_data."""
+    actions = rollout_data.actions
+    if isinstance(action_space, spaces.Discrete):
+        actions = actions.long().flatten()
+
+    was_training = policy.training
+    policy.set_training_mode(False)
+    try:
+        with th.no_grad():
+            _, log_prob, _ = policy.evaluate_actions(rollout_data.observations, actions)
+            return th.exp(log_prob - rollout_data.old_log_prob)
+    finally:
+        policy.set_training_mode(was_training)
+
+
 def clip_fraction(r: th.Tensor, eps: float) -> th.Tensor:
     """P(|r - 1| > eps): fraction of samples the clipped surrogate objective clips."""
     return (th.abs(r - 1) > eps).float().mean()
@@ -138,6 +154,8 @@ def advantages_by_window(buffer) -> tuple[np.ndarray, np.ndarray]:
     snapshots taken at different moments (before and after the VTRACE recomputation)
     must stay aligned sample by sample to be comparable.
     """
+    if hasattr(buffer, "advantage_snapshot"):
+        return buffer.advantage_snapshot()
     if not buffer.generator_ready:
         next(buffer.get(batch_size=None))  # get() is what builds the combined tensors
     adv = buffer._combined_tensors["advantages"].reshape(-1).astype(np.float64)

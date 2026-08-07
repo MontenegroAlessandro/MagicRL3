@@ -1,7 +1,7 @@
 from stable_baselines3 import PPO
 
-from .adaptive_lr import AdaptiveLRScheduler
-from .diagnostics import (
+from .utils.adaptive_lr import AdaptiveLRScheduler
+from .utils.diagnostics import (
     approx_kl,
     clip_fraction,
     collect_ratios,
