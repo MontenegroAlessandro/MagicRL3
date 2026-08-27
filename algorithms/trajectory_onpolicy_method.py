@@ -140,6 +140,11 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
                 UserWarning,
             )
 
+    def _reset_env(self, env: VecEnv) -> np.ndarray:
+        """Hook so subclasses can control/record how the rollout env is reset.
+        Default: unchanged behavior."""
+        return env.reset()
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -167,7 +172,8 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         rollout_buffer.reset()
 
         # Fresh reset: we always want complete trajectories, never mid-episode starts
-        self._last_obs = env.reset()  # type: ignore[assignment]
+        # self._last_obs = env.reset()  # type: ignore[assignment]
+        self._last_obs = self._reset_env(env)
         self._last_episode_starts = np.ones(env.num_envs, dtype=bool)
 
         if self.use_sde:
@@ -309,6 +315,11 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
                 self.dump_logs(iteration)
 
             self.train()
+
+        # the loop's own dump_logs() call fires BEFORE train(), so the very last
+        # iteration's train/* metrics would otherwise never reach the logger's sinks.
+        if log_interval is not None and iteration > 0:
+            self.dump_logs(iteration)
 
         callback.on_training_end()
 

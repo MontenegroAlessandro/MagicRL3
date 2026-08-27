@@ -1,0 +1,8 @@
+name: fdpg
+
+sigma: 0.1
+mode: step               # step | trajectory
+sampling_mode: normal    # normal | sphere
+sampling_strategy: step  # step | trajectory
+# batch_size is not set here on purpose -- FDPG requires env.num_envs == batch_size,
+# so run.py derives it directly from experiment.n_envs to keep the two in sync.

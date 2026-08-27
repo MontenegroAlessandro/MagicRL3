@@ -34,8 +34,7 @@ class ActorOnlyPolicy(BasePolicy):
     related to value estimation. evaluate_actions() returns (log_prob, entropy)
     and forward() returns (actions, log_prob).
 
-    :param net_arch: List of hidden-layer sizes for the actor MLP.
-                     Defaults to [64, 64].
+    :param net_arch: List of hidden-layer sizes for the actor MLP. Defaults to [64, 64].
     """
 
     def __init__(

@@ -1,3 +1,7 @@
+defaults:
+  - algo@experiment.algo: reinforce
+  - _self_
+
 wandb:
   project: reinforce
   sync_tensorboard: true
@@ -10,17 +14,18 @@ experiment:
   total_timesteps: 1_000_000
   dir_name: results
   render: false
+  # normalize_obs/normalize_reward only apply to REINFORCE. FDPG's perturbed-env pool
+  # bypasses VecNormalize (see run.py), so these are ignored (with a warning) when
+  # algo=fdpg -- normalizing would desync the perturbed rollouts from the reference one.
   normalize_obs: true
   normalize_reward: false
 
-  # REINFORCE hyperparameters
+  # Shared policy-gradient hyperparameters (algo-specific ones live under algo:)
   policy_type: MlpPolicy
   learning_rate: 1e-3
   n_steps: 1000           # maximum trajectory horizon (hard cap)
   gamma: 1
   max_grad_norm: null
-  ent_coef: 0.0           
-  normalize_returns: false 
   # Exploration
   use_sde: false
   sde_sample_freq: -1

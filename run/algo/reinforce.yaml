@@ -1,0 +1,4 @@
+name: reinforce
+
+ent_coef: 0.0
+normalize_returns: false
