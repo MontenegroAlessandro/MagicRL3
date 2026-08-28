@@ -1,0 +1,28 @@
+# @package experiment
+# Tuned config from the paper, Table 2.
+env_name: Ant-v5
+n_envs: 1
+total_timesteps: 3e6         # differs from default (1e6)
+normalize_obs: true
+normalize_reward: false
+
+policy_type: MlpPolicy
+learning_rate: 1.91e-5       # differs from default (3e-4)
+n_steps: 512                 # differs from default (2048)
+batch_size: 32               # differs from default (64)
+n_epochs: 10
+gamma: 0.98                  # differs from default (0.99)
+gae_lambda: 0.8              # differs from default (0.95)
+clip_range: 0.1              # differs from default (0.2)
+clip_range_vf: null
+normalize_advantage: true
+ent_coef: 4.96e-7            # differs from default (0.0)
+vf_coef: 0.677               # differs from default (0.5)
+max_grad_norm: 0.6           # differs from default (0.5)
+use_sde: false
+sde_sample_freq: -1
+policy_kwargs:
+  log_std_init: 0.0
+  net_arch: [64, 64]
+  ortho_init: true
+  activation_fn: tanh
