@@ -121,8 +121,32 @@ class PoserRolloutBuffer(RolloutBuffer):
         )
         self._current_rollout_cache = None
 
+    def discard_window(self, window_id: int) -> None:
+        """Permanently evict one historical window by id, immediately.
+
+        window_id follows the usual convention: 0 is the current in-progress rollout
+        (never discardable here), 1 the most recently archived rollout, up to
+        n_rollouts - 1 the oldest. This acts right away, distinct from and in addition
+        to the maxlen-driven eviction reset() performs on its own schedule -- useful
+        while the window is still filling up (n_rollouts < window_size), where nothing
+        else would evict a window before it naturally reaches capacity. No-op if there
+        is no history yet.
+        """
+        if not self.history:
+            return
+        if not (1 <= window_id <= len(self.history)):
+            raise ValueError(f"window_id must be between 1 and {len(self.history)}, got {window_id}")
+        del self.history[window_id - 1]
+
     def get(self, batch_size: Optional[int] = None) -> Generator[PoserRolloutBufferSamples, None, None]:
-        """Yield one full pass using random or rollout-balanced indices."""
+        """Yield one full pass using random or rollout-balanced indices.
+
+        "balanced" guarantees every minibatch contains samples from every window, which
+        the POSER policy loss relies on to compute a valid weighted sum over windows.
+        "random" gives no such guarantee: a minibatch can miss a window entirely, in
+        which case that window's term is silently dropped from that step's loss rather
+        than reweighted, a known and accepted source of bias/noise with this mode.
+        """
         if not self.full:
             raise RuntimeError("The current rollout is not full")
         if batch_size is not None and batch_size <= 0:
@@ -136,6 +160,12 @@ class PoserRolloutBuffer(RolloutBuffer):
                 rollout_indices = np.flatnonzero(self.window_id == rollout)
                 indices_by_rollout.append(np.random.permutation(rollout_indices))
             indices = np.stack(indices_by_rollout, axis=1).reshape(-1)
+            if batch_size is not None:
+                # Round to a multiple of n_rollouts so every minibatch (including the
+                # trailing partial one) covers every window, even while the window is
+                # still filling up during warm-up and n_rollouts < window_size.
+                per_window_count = max(1, batch_size // self.n_rollouts)
+                batch_size = per_window_count * self.n_rollouts
         elif self.batch_sampling == "random" or self.n_rollouts == 1:
             indices = np.random.permutation(len(self.window_id))
 
@@ -260,7 +290,16 @@ class PoserRolloutBuffer(RolloutBuffer):
             self.returns[historical_start:] = flattened_v_t
             self.advantages[historical_start:] = flattened_A_t
 
-    def _compute_vtrace(self, rewards_t: np.ndarray, episode_starts_t: np.ndarray, V_t: np.ndarray, log_mu_t: np.ndarray, log_pi_t: np.ndarray, bootstrap_V: np.ndarray, bootstrap_episode_starts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _compute_vtrace(
+            self, 
+            rewards_t: np.ndarray, 
+            episode_starts_t: np.ndarray, 
+            V_t: np.ndarray, 
+            log_mu_t: np.ndarray, 
+            log_pi_t: np.ndarray, 
+            bootstrap_V: np.ndarray, 
+            bootstrap_episode_starts: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray]:
         """Apply V-trace to arrays shaped [historical rollout, timestep, environment]."""
 
         # IMPALA notation: mu is the behavior policy, pi is the current target policy, and V_t = V(x_t).

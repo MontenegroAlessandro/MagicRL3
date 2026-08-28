@@ -36,7 +36,7 @@ def parse_policy_kwargs(policy_kwargs):
         kwargs["activation_fn"] = ACTIVATION_FN[name.lower()]
     return kwargs
 
-@hydra.main(version_base=None, config_path="config", config_name="conf_ppo")
+@hydra.main(version_base=None, config_path="config", config_name="conf_poser")
 def main(cfg: DictConfig):
     exp = cfg.experiment
 
@@ -52,11 +52,13 @@ def main(cfg: DictConfig):
 
     # logger
     if window_size > 1:
-        sampling = exp.batch_sampling or "balanced"
+        sampling = exp.batch_sampling
+        ess_label = exp.ess_decay_threshold if exp.ess_decay_threshold is not None else "off"
         base_name = (
             f"POSER w={window_size} bs={sampling} "
             f"(Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} "
-            f"(n_b,b_s)=({n_minibatch_effective},{batch_size})"
+            f"(n_b,b_s)=({n_minibatch_effective},{batch_size}) "
+            f"ess={ess_label} disc={exp.discard_policy or 'oldest'}"
         )
     else:
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
@@ -118,11 +120,11 @@ def main(cfg: DictConfig):
         model = MyPPO(**PPO_config)
     else:
         model = POSER(
-            weight_type=exp.weight_type,
+            weight_type=exp.weight_type or "uniform",
             weighted_critic=exp.weighted_critic,
             weight_discard_threshold=exp.weight_discard_threshold,
-            optimization_stopping_threshold=exp.optimization_stopping_threshold,
-            optimization_stopping_strategy=exp.optimization_stopping_strategy,
+            ess_decay_threshold=exp.ess_decay_threshold,
+            discard_policy=exp.discard_policy or "oldest",
             rollout_buffer_class=PoserRolloutBuffer,
             rollout_buffer_kwargs=dict(
                 window_size=window_size,
