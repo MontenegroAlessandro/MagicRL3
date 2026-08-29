@@ -320,12 +320,16 @@ class POSER(PPO):
         # the exact point reset()'s own maxlen rotation would otherwise trigger --
         # never during warm-up (n_rollouts < window_size), where nothing should be
         # evicted yet. Runs regardless of how the epoch loop ended (early stop or all
-        # n_epochs completed), respecting discard_policy: "oldest" reproduces the
+        # n_epochs completed), and independently of ess_decay_threshold: discard_policy
+        # governs which window gets evicted whether or not early stopping is enabled --
+        # gating this on ess_decay_threshold too would silently fall back to the
+        # buffer's own FIFO eviction (i.e. "oldest") whenever early stopping is off,
+        # ignoring an explicit discard_policy="highest_decay". "oldest" reproduces the
         # natural FIFO rotation exactly (a no-op relative to letting reset() handle
         # it); "highest_decay" instead evicts by decay_i(theta) = ESS_i(theta) /
         # ESS_i(theta_k) at this exact exit point (freshly computed, not reused from
         # the loop above), the same quantity the stopping check above uses.
-        if self.ess_decay_threshold is not None and self.rollout_buffer.n_rollouts >= self.rollout_buffer.window_size:
+        if self.rollout_buffer.n_rollouts >= self.rollout_buffer.window_size:
             if self.discard_policy == "oldest":
                 window_to_discard = self.rollout_buffer.n_rollouts - 1
             else:  # "highest_decay"
