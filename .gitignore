@@ -1,3 +1,6 @@
+# vsdode stuff
+.vscode/
+
 # saved data
 *.zip
 results/
