@@ -9,8 +9,8 @@ normalize_reward: false
 policy_type: MlpPolicy
 learning_rate: 3e-4
 n_steps: 2048
-batch_size: 64
-n_minibatches: null  # alternative to batch_size; ignored unless batch_size is null
+batch_size: null  # alternative to n_minibatches; takes precedence when not null
+n_minibatches: 32
 n_epochs: 10
 gamma: 0.99
 gae_lambda: 0.95
