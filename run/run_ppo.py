@@ -25,8 +25,8 @@ def main(cfg: DictConfig):
         batch_size = exp.batch_size
         n_minibatch_effective = (exp.n_steps * exp.n_envs * exp.window_size) // batch_size
     else:
-        batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatch
-        n_minibatch_effective = exp.n_minibatch
+        batch_size = (exp.n_steps * exp.n_envs * exp.window_size) // exp.n_minibatches
+        n_minibatch_effective = exp.n_minibatches
 
     # logger
     if exp.window_size > 1:

@@ -10,6 +10,7 @@ policy_type: MlpPolicy
 learning_rate: 2.06e-5       # differs from default (3e-4)
 n_steps: 512                 # differs from default (2048)
 batch_size: 64
+n_minibatches: null  # alternative to batch_size; ignored unless batch_size is null
 n_epochs: 20                 # differs from default (10)
 gamma: 0.98                  # differs from default (0.99)
 gae_lambda: 0.92             # differs from default (0.95)
