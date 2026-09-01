@@ -22,6 +22,7 @@ from .utils.diagnostics import (
 
 WEIGHT_TYPES = ("uniform", "variance-based")
 DISCARD_POLICIES = ("oldest", "highest_decay")
+CLIP_RANGE_ADAPTATIONS = ("none", "weight_scaled")
 
 
 class POSER(PPO):
@@ -37,6 +38,7 @@ class POSER(PPO):
         weight_discard_threshold: Optional[float] = None,
         ess_decay_threshold: Optional[float] = None,
         discard_policy: str = "oldest",
+        clip_range_adaptation: str = "none",
         **kwargs,
     ) -> None:
         if weight_type not in WEIGHT_TYPES:
@@ -45,12 +47,18 @@ class POSER(PPO):
             raise ValueError(f"ess_decay_threshold must be in (0, 1], got {ess_decay_threshold!r}")
         if discard_policy not in DISCARD_POLICIES:
             raise ValueError(f"discard_policy must be one of {DISCARD_POLICIES}, got {discard_policy!r}")
+        if clip_range_adaptation not in CLIP_RANGE_ADAPTATIONS:
+            raise ValueError(
+                "clip_range_adaptation must be one of "
+                f"{CLIP_RANGE_ADAPTATIONS}, got {clip_range_adaptation!r}"
+            )
 
         self.weight_type = weight_type
         self.weighted_critic = weighted_critic
         self.weight_discard_threshold = weight_discard_threshold
         self.ess_decay_threshold = ess_decay_threshold
         self.discard_policy = discard_policy
+        self.clip_range_adaptation = clip_range_adaptation
         self._ess_at_theta_k: Optional[th.Tensor] = None
 
         super().__init__(*args, **kwargs)
@@ -232,6 +240,16 @@ class POSER(PPO):
 
         raise ValueError(f"weight_type must be one of {WEIGHT_TYPES}, got {weight_type!r}")
 
+    def _compute_clip_ranges(
+        self, clip_range: float, window_weights: th.Tensor
+    ) -> th.Tensor:
+        """Return the policy clip range for each currently available window."""
+        if self.clip_range_adaptation == "none":
+            return th.full_like(window_weights, clip_range)
+
+        window_length = window_weights.numel()
+        return clip_range / (window_length * window_weights)
+
     def _compute_ess(self, rollout_data) -> th.Tensor:
         """Per-window effective sample size ESS_i(theta) = N_i / d_2(pi_theta || pi_{theta_k-i})."""
         _, samples_per_window, log_mean_d2_by_window = self._compute_log_mean_d2(rollout_data)
@@ -331,6 +349,7 @@ class POSER(PPO):
                 window_weights = th.softmax(0.5 * (log_sample_count - log_mean_d2_by_window), dim=0)
             else:
                 window_weights = self._compute_weights(complete_rollout_data)
+            window_clip_ranges = self._compute_clip_ranges(clip_range, window_weights)
 
             # ESS-decay early stopping: gates whether to enter this epoch at all: it
             # does not interrupt one already in progress. theta here is the iterate
@@ -368,8 +387,15 @@ class POSER(PPO):
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
 
                 # Weighted POSER clipped surrogate: sum_i w_i L_i.
+                sample_clip_ranges = window_clip_ranges[
+                    rollout_data.window_id.long()
+                ]
                 policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                policy_loss_2 = advantages * th.clamp(
+                    ratio,
+                    1 - sample_clip_ranges,
+                    1 + sample_clip_ranges,
+                )
                 clipped_objective = th.min(policy_loss_1, policy_loss_2)
                 unique_windows = th.unique(rollout_data.window_id, sorted=True)
                 batch_window_weights = window_weights[unique_windows.long()]
@@ -381,7 +407,9 @@ class POSER(PPO):
 
                 # Logging
                 pg_losses.append(policy_loss.item())
-                clip_fraction_value = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                clip_fraction_value = th.mean(
+                    (th.abs(ratio - 1) > sample_clip_ranges).float()
+                ).item()
                 clip_fractions.append(clip_fraction_value)
 
                 if self.clip_range_vf is None:
@@ -521,9 +549,20 @@ class POSER(PPO):
         window_weights_variance = th.softmax(
             0.5 * (log_sample_count - log_mean_d2_by_window), dim=0
         )
+        window_weights = (
+            window_weights_variance
+            if self.weight_type == "variance-based"
+            else self._compute_weights(rollout_data)
+        )
+        window_clip_ranges = self._compute_clip_ranges(clip_range, window_weights)
 
         for window_id, weight in enumerate(window_weights_variance):
             self.logger.record(f"diag/weight/variance_based/{stage}_w{window_id}", weight.item())
+        for window_id, window_clip_range in enumerate(window_clip_ranges):
+            self.logger.record(
+                f"diag/clip_range/{stage}_w{window_id}",
+                window_clip_range.item(),
+            )
 
         # ESS-decay diagnostics: ESS_i(theta) / ESS_i(theta_k), 1.0 everywhere at "pre"
         # by construction (no gradient step has moved theta away from theta_k yet).
@@ -544,7 +583,12 @@ class POSER(PPO):
         subsets["mean"] = ratios
 
         for suffix, ratio in subsets.items():
-            self.logger.record(f"diag/clip_fraction/{stage}_{suffix}", clip_fraction(ratio, clip_range).item())
+            if suffix == "mean":
+                diagnostic_clip_range = window_clip_ranges[window_ids]
+            else:
+                window_id = int(suffix[1:])
+                diagnostic_clip_range = window_clip_ranges[window_id]
+            self.logger.record(f"diag/clip_fraction/{stage}_{suffix}", clip_fraction(ratio, diagnostic_clip_range).item())
             self.logger.record(f"diag/approx_kl/{stage}_{suffix}", approx_kl(ratio).item())
             self.logger.record(f"diag/abs_ratio/{stage}_{suffix}", mean_abs_deviation(ratio).item())
             self.logger.record(f"diag/normalized_ess/{stage}_{suffix}", normalized_ess(ratio).item())

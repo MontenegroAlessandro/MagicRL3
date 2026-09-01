@@ -58,7 +58,8 @@ def main(cfg: DictConfig):
             f"POSER w={window_size} bs={sampling} "
             f"(Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} "
             f"(n_b,b_s)=({n_minibatch_effective},{batch_size}) "
-            f"ess={ess_label} disc={exp.discard_policy or 'oldest'}"
+            f"ess={ess_label} disc={exp.discard_policy or 'oldest'} "
+            f"clip_adapt={exp.clip_range_adaptation or 'none'}"
         )
     else:
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
@@ -125,6 +126,7 @@ def main(cfg: DictConfig):
             weight_discard_threshold=exp.weight_discard_threshold,
             ess_decay_threshold=exp.ess_decay_threshold,
             discard_policy=exp.discard_policy or "oldest",
+            clip_range_adaptation=exp.clip_range_adaptation or "none",
             rollout_buffer_class=PoserRolloutBuffer,
             rollout_buffer_kwargs=dict(
                 window_size=window_size,

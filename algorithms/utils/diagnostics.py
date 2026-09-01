@@ -65,8 +65,8 @@ def compute_naive_ratios(policy, rollout_data, action_space) -> th.Tensor:
         policy.set_training_mode(was_training)
 
 
-def clip_fraction(r: th.Tensor, eps: float) -> th.Tensor:
-    """P(|r - 1| > eps): fraction of samples the clipped surrogate objective clips."""
+def clip_fraction(r: th.Tensor, eps: float | th.Tensor) -> th.Tensor:
+    """P(|r - 1| > eps), supporting scalar or sample-specific clip ranges."""
     return (th.abs(r - 1) > eps).float().mean()
 
 

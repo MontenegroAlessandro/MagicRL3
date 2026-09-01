@@ -37,6 +37,7 @@ experiment:
   weight_discard_threshold: null  # threshold for discarding weights
   ess_decay_threshold: null  # in (0, 1]; stop the epoch loop once any window's ESS_i(theta)/ESS_i(theta_k) drops below this. null disables early stopping entirely (no target_kl fallback)
   discard_policy: oldest  # oldest, highest_decay -- which window discard_window() evicts when ess_decay_threshold triggers
+  clip_range_adaptation: none  # none, weight_scaled; weight_scaled uses eps_i = clip_range / (current_window_length * w_i)
 
 hydra:
   run:
