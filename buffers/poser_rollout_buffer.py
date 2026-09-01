@@ -7,7 +7,7 @@ reset:
     previous D_k -> self.history as [H, N_E, ...]
     cache = None
 
-add -> compute_returns_and_advantage -> record_behavior_distribution -> recompute_advantages:
+add -> compute_returns_and_advantage -> recompute_advantages:
     self.* is filled and remains [H, N_E, ...]
     self.history remains [H, N_E, ...]
 
@@ -116,10 +116,39 @@ class PoserRolloutBuffer(RolloutBuffer):
             dtype=np.float32,
         )
         self.behavior_std = np.zeros(
-            distribution_shape,
+            self.action_dim,
             dtype=np.float32,
         )
         self._current_rollout_cache = None
+
+    def add(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        episode_start: np.ndarray,
+        value: th.Tensor,
+        log_prob: th.Tensor,
+        *,
+        behavior_mean: th.Tensor,
+        behavior_std: th.Tensor,
+    ) -> None:
+        """Add one transition and the Gaussian behavior parameters that produced it."""
+        if self.pos >= self.buffer_size:
+            raise RuntimeError("The rollout buffer is already full")
+
+        mean = behavior_mean.detach().cpu().numpy()
+        self.behavior_mean[self.pos] = mean.reshape(self.n_envs, self.action_dim)
+
+        # A diagonal Gaussian PPO policy has one state-independent log_std vector.
+        # Store it once per policy snapshot instead of H * N_E duplicate copies.
+        if self.pos == 0:
+            std = behavior_std.detach()
+            if std.ndim > 1:
+                std = std[0]
+            self.behavior_std[...] = std.cpu().numpy().reshape(self.action_dim)
+
+        super().add(obs, action, reward, episode_start, value, log_prob)
 
     def discard_window(self, window_id: int) -> None:
         """Permanently evict one historical window by id, immediately.
@@ -197,31 +226,6 @@ class PoserRolloutBuffer(RolloutBuffer):
         self._prepare_window()
         indices = np.flatnonzero(self.window_id == window_id)
         return self._get_samples(indices)
-
-    def record_behavior_distribution(self, policy) -> None:
-        """Store the Gaussian that generated the current rollout."""
-        number_of_samples = self.buffer_size * self.n_envs
-        observations = self.observations.reshape(
-            number_of_samples,
-            *self.observations.shape[2:],
-        )
-        observations = th.as_tensor(
-            observations,
-            device=policy.device,
-        )
-
-        with th.no_grad():
-            distribution = policy.get_distribution(observations).distribution
-            behavior_mean = distribution.mean.cpu().numpy()
-            behavior_std = distribution.stddev.cpu().numpy()
-
-        distribution_shape = (
-            self.buffer_size,
-            self.n_envs,
-            self.action_dim,
-        )
-        self.behavior_mean[...] = behavior_mean.reshape(distribution_shape)
-        self.behavior_std[...] = behavior_std.reshape(distribution_shape)
 
     def recompute_advantages(self, policy) -> None:
         """Recompute historical V-trace targets with the current policy and critic."""
@@ -387,7 +391,7 @@ class PoserRolloutBuffer(RolloutBuffer):
         self.values = np.concatenate([self.swap_and_flatten(rollout.values) for rollout in rollouts])
         self.log_probs = np.concatenate([self.swap_and_flatten(rollout.log_probs) for rollout in rollouts])
         self.behavior_mean = np.concatenate([self.swap_and_flatten(rollout.behavior_mean) for rollout in rollouts])
-        self.behavior_std = np.concatenate([self.swap_and_flatten(rollout.behavior_std) for rollout in rollouts])
+        self.behavior_std = np.stack([rollout.behavior_std for rollout in rollouts])
         self.advantages = np.concatenate([self.swap_and_flatten(rollout.advantages) for rollout in rollouts])
         self.returns = np.concatenate([self.swap_and_flatten(rollout.returns) for rollout in rollouts])
 
@@ -403,7 +407,9 @@ class PoserRolloutBuffer(RolloutBuffer):
             old_values=samples.old_values,
             old_log_prob=samples.old_log_prob,
             behavior_mean=self.to_torch(self.behavior_mean[batch_inds]),
-            behavior_std=self.to_torch(self.behavior_std[batch_inds]),
+            behavior_std=self.to_torch(
+                self.behavior_std[self.window_id[batch_inds]]
+            ),
             advantages=samples.advantages,
             returns=samples.returns,
             window_id=self.to_torch(self.window_id[batch_inds]),

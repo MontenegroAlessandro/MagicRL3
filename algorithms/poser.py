@@ -7,7 +7,7 @@ import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
 from stable_baselines3 import PPO
-from stable_baselines3.common.utils import explained_variance
+from stable_baselines3.common.utils import explained_variance, obs_as_tensor
 
 from .utils.diagnostics import (
     advantages_by_window,
@@ -54,13 +54,119 @@ class POSER(PPO):
         self._ess_at_theta_k: Optional[th.Tensor] = None
 
         super().__init__(*args, **kwargs)
+        if self.use_sde:
+            raise ValueError(
+                "POSER requires a state-independent Gaussian standard deviation; "
+                "set use_sde=False"
+            )
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
-        """Collect a rollout and store its behavior Gaussian."""
-        rollout_complete = super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps)
-        if rollout_complete:
-            rollout_buffer.record_behavior_distribution(self.policy)
-        return rollout_complete
+        """
+        Collect experiences using the current policy and fill a ``RolloutBuffer``.
+        The term rollout here refers to the model-free notion and should not
+        be used with the concept of rollout used in model-based RL or planning.
+
+        :param env: The training environment
+        :param callback: Callback that will be called at each step
+            (and at the beginning and end of the rollout)
+        :param rollout_buffer: Buffer to fill with rollouts
+        :param n_rollout_steps: Number of experiences to collect per environment
+        :return: True if function returned with at least `n_rollout_steps`
+            collected, False if callback terminated rollout prematurely.
+        """
+        assert self._last_obs is not None, "No previous observation was provided"
+        # Switch to eval mode (this affects batch norm / dropout)
+        self.policy.set_training_mode(False)
+
+        n_steps = 0
+        rollout_buffer.reset()
+        # Sample new weights for the state dependent exploration
+        if self.use_sde:
+            self.policy.reset_noise(env.num_envs)
+
+        callback.on_rollout_start()
+
+        while n_steps < n_rollout_steps:
+            if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
+                # Sample a new noise matrix
+                self.policy.reset_noise(env.num_envs)
+
+            with th.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(self._last_obs, self.device)  # type: ignore[arg-type]
+                actions, values, log_probs = self.policy(obs_tensor)
+                behavior_distribution = self.policy.get_distribution(obs_tensor).distribution
+                behavior_mean = behavior_distribution.mean
+                behavior_std = behavior_distribution.stddev
+
+            actions = actions.cpu().numpy()
+
+            # Rescale and perform action
+            clipped_actions = actions
+
+            if isinstance(self.action_space, spaces.Box):
+                if self.policy.squash_output:
+                    # Unscale the actions to match env bounds
+                    # if they were previously squashed (scaled in [-1, 1])
+                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                else:
+                    # Otherwise, clip the actions to avoid out of bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+
+            new_obs, rewards, dones, infos = env.step(clipped_actions)
+
+            self.num_timesteps += env.num_envs
+
+            # Give access to local variables
+            callback.update_locals(locals())
+            if not callback.on_step():
+                return False
+
+            self._update_info_buffer(infos, dones)
+            n_steps += 1
+
+            if isinstance(self.action_space, spaces.Discrete):
+                # Reshape in case of discrete action
+                actions = actions.reshape(-1, 1)
+
+            # Handle timeout by bootstrapping with value function
+            # see GitHub issue #633
+            for idx, done in enumerate(dones):
+                if (
+                    done
+                    and infos[idx].get("terminal_observation") is not None
+                    and infos[idx].get("TimeLimit.truncated", False)
+                ):
+                    terminal_obs = self.policy.obs_to_tensor(infos[idx]["terminal_observation"])[0]
+                    with th.no_grad():
+                        terminal_value = self.policy.predict_values(terminal_obs)[0]  # type: ignore[arg-type]
+                    rewards[idx] += self.gamma * terminal_value
+
+            rollout_buffer.add(
+                self._last_obs,  # type: ignore[arg-type]
+                actions,
+                rewards,
+                self._last_episode_starts,  # type: ignore[arg-type]
+                values,
+                log_probs,
+                behavior_mean=behavior_mean,
+                behavior_std=behavior_std,
+            )
+            self._last_obs = new_obs  # type: ignore[assignment]
+            self._last_episode_starts = dones
+
+        with th.no_grad():
+            # Compute value for the last timestep
+            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+
+        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
+
+        callback.update_locals(locals())
+
+        callback.on_rollout_end()
+
+        return True
 
     def _compute_log_mean_d2(self, rollout_data) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """Per-window log-mean of the per-sample 2-Renyi divergence pi_theta || pi_{k-i}.
@@ -184,10 +290,20 @@ class POSER(PPO):
         # ESS_i(theta_k): the baseline every later epoch's ESS-decay check (and the
         # diag/ess_decay/* diagnostics below) is measured against. theta_k = the
         # policy right now, before any gradient step this call.
-        self._ess_at_theta_k = self._compute_ess(complete_rollout_data)
+        d2_stats_at_theta_k = self._compute_log_mean_d2(complete_rollout_data)
+        _, samples_per_window_at_theta_k, log_mean_d2_at_theta_k = d2_stats_at_theta_k
+        self._ess_at_theta_k = (
+            samples_per_window_at_theta_k.to(log_mean_d2_at_theta_k.dtype)
+            / log_mean_d2_at_theta_k.exp()
+        )
 
         # POSER diagnostics before the PPO update.
-        self._log_diagnostics(clip_range, "pre")
+        self._log_diagnostics(
+            clip_range,
+            "pre",
+            rollout_data=complete_rollout_data,
+            d2_stats=d2_stats_at_theta_k,
+        )
 
         entropy_losses = []
         pg_losses, value_losses = [], []
@@ -205,7 +321,10 @@ class POSER(PPO):
             # tried and cost ~n_minibatches x more compute than the update itself.
             need_d2 = self.weight_type == "variance-based" or self.ess_decay_threshold is not None
             if need_d2:
-                _, samples_per_window, log_mean_d2_by_window = self._compute_log_mean_d2(complete_rollout_data)
+                if epoch == 0:
+                    _, samples_per_window, log_mean_d2_by_window = d2_stats_at_theta_k
+                else:
+                    _, samples_per_window, log_mean_d2_by_window = self._compute_log_mean_d2(complete_rollout_data)
 
             if self.weight_type == "variance-based":
                 log_sample_count = th.log(samples_per_window.to(log_mean_d2_by_window.dtype))
@@ -380,19 +499,36 @@ class POSER(PPO):
 
 
 
-    def _log_diagnostics(self, clip_range: float, stage: Literal["pre", "post"]) -> None:
+    def _log_diagnostics(
+        self,
+        clip_range: float,
+        stage: Literal["pre", "post"],
+        rollout_data=None,
+        d2_stats=None,
+    ) -> None:
         """Log ratio diagnostics and, before training, advantage diagnostics."""
 
-        # weights diagnostics
-        rollout_data = self.rollout_buffer.get_all()
-        window_weights_variance = self._compute_weights(rollout_data, weight_type="variance-based")
+        if rollout_data is None:
+            rollout_data = self.rollout_buffer.get_all()
+        if d2_stats is None:
+            d2_stats = self._compute_log_mean_d2(rollout_data)
+        _, samples_per_window, log_mean_d2_by_window = d2_stats
+
+        # Weight and ESS diagnostics are transforms of the same D_2 forward pass.
+        log_sample_count = th.log(
+            samples_per_window.to(log_mean_d2_by_window.dtype)
+        )
+        window_weights_variance = th.softmax(
+            0.5 * (log_sample_count - log_mean_d2_by_window), dim=0
+        )
 
         for window_id, weight in enumerate(window_weights_variance):
             self.logger.record(f"diag/weight/variance_based/{stage}_w{window_id}", weight.item())
 
         # ESS-decay diagnostics: ESS_i(theta) / ESS_i(theta_k), 1.0 everywhere at "pre"
         # by construction (no gradient step has moved theta away from theta_k yet).
-        ess_decay = self._compute_ess(rollout_data) / self._ess_at_theta_k
+        ess = samples_per_window.to(log_mean_d2_by_window.dtype) / log_mean_d2_by_window.exp()
+        ess_decay = ess / self._ess_at_theta_k
         for window_id, decay in enumerate(ess_decay):
             self.logger.record(f"diag/ess_decay/{stage}_w{window_id}", decay.item())
 
