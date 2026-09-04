@@ -14,9 +14,10 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import envs  # triggers the registration of new envs
-from algorithms import Reinforce, FDPG
+from algorithms import PolicyGradient, FDPG
+from callbacks.trajectory_eval_callback import TrajectoryEvalCallback
 
-ALGOS = ("reinforce", "fdpg")
+ALGOS = ("reinforce", "gpomdp", "fdpg")
 
 
 def build_run_name(exp) -> str:
@@ -24,6 +25,12 @@ def build_run_name(exp) -> str:
     if algo.name == "reinforce":
         return (
             f"REINFORCE Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} "
+            f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
+        )
+    elif algo.name == "gpomdp":
+        return (
+            f"GPOMDP Ne={exp.n_envs} H={exp.n_steps} "
             f"lr={exp.learning_rate} γ={exp.gamma} "
             f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
         )
@@ -39,8 +46,9 @@ def build_run_name(exp) -> str:
 
 def build_model(exp, env, policy_kwargs, tensorboard_log):
     algo = exp.algo
-    if algo.name == "reinforce":
-        return Reinforce(
+    if algo.name in ["reinforce", "gpomdp"]:
+        return PolicyGradient(
+            g_estimator=algo.name,
             policy=exp.policy_type,
             env=env,
             learning_rate=exp.learning_rate,
@@ -109,7 +117,7 @@ def main(cfg: DictConfig):
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
 
     # --- Evaluation env ---
-    eval_env = make_vec_env(exp.env_name, n_envs=1, seed=exp.seed + 1000)
+    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_episodes, seed=exp.seed + 1000)
 
     # FDPG builds its own perturbed-env pool internally via raw gym.make() (see
     # FDPG._setup_model), bypassing VecNormalize. Wrapping the main env in VecNormalize
@@ -147,14 +155,21 @@ def main(cfg: DictConfig):
 
     model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}")
 
-    eval_callback = EvalCallback(
+    # eval_callback = EvalCallback(
+    #     eval_env,
+    #     best_model_save_path=f"{exp.dir_name}/models/{run.id}",
+    #     log_path=f"{exp.dir_name}/logs/{run.id}",
+    #     eval_freq=exp.eval_freq,
+    #     n_eval_episodes=exp.n_eval_episodes,
+    #     deterministic=True,
+    #     render=False,
+    #     verbose=0,
+    # )
+    eval_callback = TrajectoryEvalCallback(
         eval_env,
-        best_model_save_path=f"{exp.dir_name}/models/{run.id}",
-        log_path=f"{exp.dir_name}/logs/{run.id}",
-        eval_freq=exp.eval_freq,
         n_eval_episodes=exp.n_eval_episodes,
+        eval_freq=exp.eval_freq,
         deterministic=True,
-        render=False,
         verbose=0,
     )
 

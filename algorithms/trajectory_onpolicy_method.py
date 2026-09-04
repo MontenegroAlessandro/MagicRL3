@@ -234,16 +234,7 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
             self._last_obs = new_obs  # type: ignore[assignment]
             self._last_episode_starts = dones
 
-        # if active.any():
-        #     warnings.warn(
-        #         f"{active.sum()} environment(s) did not finish their trajectory within "
-        #         f"the maximum horizon of {n_rollout_steps} steps. Their returns will be "
-        #         "computed on the truncated trajectory (no bootstrapping).",
-        #         UserWarning,
-        #     )
-
         rollout_buffer.compute_returns()
-
         callback.update_locals(locals())
         callback.on_rollout_end()
 

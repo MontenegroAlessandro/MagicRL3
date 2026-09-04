@@ -129,15 +129,16 @@ class TrajectoryBuffer(BaseBuffer):
             returns_2d = padded
         else:
             # build the vector of discounts (gamma^0, gamma^1, ..., gamma^(max_len-1))
-            gamma_powers = self.gamma ** np.arange(max_len, dtype=np.float32)  # (max_len,)
+            gamma_powers = self.gamma ** np.arange(max_len, dtype=np.float64)  # (max_len,)
             # compute the rewards with dicsounts
-            scaled = padded * gamma_powers      # (n_envs, max_len)
+            scaled = padded.astype(np.float64) * gamma_powers      # (n_envs, max_len)
             # do the reverse sum place  
             # [:, ::-1] is actually reversing the rows
             suffix = np.cumsum(scaled[:, ::-1], axis=1)[:, ::-1]               # (n_envs, max_len)
-            # scale by the actual disocunt factor at time t to get the correct returns-to-go
+            # scale by the actual discount factor at time t to get the correct returns-to-go
             # (the cumsum accumulates unwanted gamma factors in each element due to the multiplication by gamma_powers)
-            returns_2d = suffix / gamma_powers                                  # (n_envs, max_len)
+            returns_2d = (suffix / gamma_powers).astype(np.float32)                                  # (n_envs, max_len)
+            # NOTE: we use float64 just as a guard against numerical instabilities for the gamma division
 
         self._returns = [returns_2d[i, : lengths[i]] for i in range(self.n_envs)]
         self.full = True

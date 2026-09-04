@@ -3,15 +3,15 @@ defaults:
   - _self_
 
 wandb:
-  project: reinforce
+  project: det-pg
   sync_tensorboard: true
-  tags: []
+  tags: [debug, gpomdp, swimmer]
 
 experiment:
   # Environment
-  env_name: CartPole-v1
+  env_name: Swimmer-v5
   n_envs: 20
-  total_timesteps: 1_000_000
+  total_timesteps: 5_000_000
   dir_name: results
   render: false
   # normalize_obs/normalize_reward only apply to REINFORCE. FDPG's perturbed-env pool
@@ -32,8 +32,8 @@ experiment:
 
   # Logging / evaluation
   stats_window_size: 100
-  eval_freq: null # 10_000
-  n_eval_episodes: 50
+  eval_freq: 10_000
+  n_eval_episodes: 25
   verbose: 0
   seed: 2026
   device: cpu

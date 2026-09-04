@@ -10,10 +10,10 @@ from algorithms.trajectory_onpolicy_method import TrajectoryOnPolicyAlgorithm
 from buffers import TrajectoryBuffer
 from policies import ActorOnlyPolicy
 
-SelfReinforce = TypeVar("SelfReinforce", bound="Reinforce")
+SelfPolicyGradient = TypeVar("SelfPolicyGradient", bound="PolicyGradient")
 
 
-class Reinforce(TrajectoryOnPolicyAlgorithm):
+class PolicyGradient(TrajectoryOnPolicyAlgorithm):
     """
     REINFORCE (Williams, 1992) — vanilla policy gradient.
 
@@ -32,10 +32,13 @@ class Reinforce(TrajectoryOnPolicyAlgorithm):
         "MlpPolicy": ActorOnlyPolicy,
     }
 
+    g_estimator_types: ClassVar[list[str]] = ["reinforce", "gpomdp"]
+
     def __init__(
         self,
         policy: Union[str, type[ActorOnlyPolicy]],
         env: Union[GymEnv, str],
+        g_estimator: str = "reinforce",
         learning_rate: Union[float, Schedule] = 1e-3,
         n_steps: int = 1000,
         gamma: float = 0.99,
@@ -82,6 +85,8 @@ class Reinforce(TrajectoryOnPolicyAlgorithm):
 
         self.ent_coef = ent_coef
         self.normalize_returns = normalize_returns
+        assert g_estimator in self.g_estimator_types, f"Invalid g_estimator '{g_estimator}'. Choose from: {self.g_estimator_types}"
+        self.g_estimator = g_estimator
         self._n_updates = 0
 
         if _init_setup_model:
@@ -108,19 +113,37 @@ class Reinforce(TrajectoryOnPolicyAlgorithm):
             )                                                           # (N,)
             N = len(lengths)
             traj_idx = th.repeat_interleave(th.arange(N, device=self.device), lengths)  # (total_steps,)
-
-            # Sum log π(a_t|s_t) over the steps of each trajectory: shape (N,)
-            log_prob_sums = th.zeros(N, device=self.device).scatter_add_(0, traj_idx, log_prob)
+            starts = th.cat([th.zeros(1, dtype=th.long, device=self.device), lengths.cumsum(0)[:-1]])
 
             # G(τ_i) = return-to-go at t=0 = total discounted return of trajectory i
-            starts = th.cat([th.zeros(1, dtype=th.long, device=self.device), lengths.cumsum(0)[:-1]])
             G = rollout_data.returns[starts]                            # (N,)
 
-            if self.normalize_returns:
-                G = (G - G.mean()) / (G.std() + 1e-8)
+            if self.g_estimator == "reinforce":
+                # Sum log π(a_t|s_t) over the steps of each trajectory: shape (N,)
+                log_prob_sums = th.zeros(N, device=self.device).scatter_add_(0, traj_idx, log_prob)
 
-            # L = -(1/N) Σ_i [ G(τ_i) · Σ_t log π(a_t^i | s_t^i) ]
-            policy_loss = -(G * log_prob_sums).mean()
+                if self.normalize_returns:
+                    G = (G - G.mean()) / (G.std() + 1e-8)
+
+                # L = -(1/N) Σ_i [ G(τ_i) · Σ_t log π(a_t^i | s_t^i) ]
+                policy_loss = -(G * log_prob_sums).mean()
+            elif self.g_estimator == "gpomdp":
+                # L = -(1/N) Σ_i [ Σ_t gamma^T · G_t · log π(a_t^i | s_t^i) ]
+                # NOTE: we have to manage the fact that all is flat here
+
+                # build the gamma powers
+                total_steps = log_prob.shape[0]
+                local_t = th.arange(total_steps, device=self.device) - starts[traj_idx]  # (total_steps,)
+                gamma_powers = self.gamma ** local_t.float()
+
+                # build the scores form the flat data
+                weighted_score = gamma_powers * rollout_data.returns * log_prob
+
+                # divide the scores by trajectory and average them
+                per_traj_score = th.zeros(N, device=self.device).scatter_add_(0, traj_idx, weighted_score)
+                policy_loss = -per_traj_score.mean() 
+            else:
+                raise ValueError(f"Unknown g_estimator '{self.g_estimator}'. Choose from: {self.g_estimator_types}")
 
             # entropy regularization (averaged over steps, not summed, to be length-invariant)
             entropy_loss = -(-log_prob if entropy is None else entropy).mean()
@@ -142,14 +165,14 @@ class Reinforce(TrajectoryOnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
     def learn(
-        self: SelfReinforce,
+        self: SelfPolicyGradient,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 1,
         tb_log_name: str = "REINFORCE",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfReinforce:
+    ) -> SelfPolicyGradient:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
