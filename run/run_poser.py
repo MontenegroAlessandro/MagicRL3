@@ -11,6 +11,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from algorithms import POSER, MyPPO
+from algorithms.utils.wandb_logging import WandbMetricsCallback
 import envs
 from buffers.poser_rollout_buffer import PoserRolloutBuffer
 import torch.nn as nn
@@ -53,25 +54,32 @@ def main(cfg: DictConfig):
     # logger
     if window_size > 1:
         sampling = exp.batch_sampling
-        ess_label = exp.ess_decay_threshold if exp.ess_decay_threshold is not None else "off"
+        psr_label = exp.psr_threshold if exp.psr_threshold is not None else "off"
         base_name = (
-            f"POSER w={window_size} bs={sampling} "
+            f"POSER w={window_size} bs={sampling} wt={exp.weight_type or 'uniform'} "
             f"(Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} "
             f"(n_b,b_s)=({n_minibatch_effective},{batch_size}) "
-            f"ess={ess_label} disc={exp.discard_policy or 'oldest'} "
+            f"psr={psr_label} disc={exp.discard_policy or 'oldest'} "
             f"clip_adapt={exp.clip_range_adaptation or 'none'}"
         )
     else:
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
     base_name += f" norm_r={exp.normalize_reward} gamma={exp.gamma} eps={exp.clip_range}"
+    if exp.extra_name is not None:
+        base_name += f" {exp.extra_name}"
+    if exp.name is not None:
+        base_name = exp.name
 
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
+    # POSER dumps two clocks into TensorBoard. Send its metrics directly to W&B
+    # so tensorboard synchronization cannot merge unrelated rows.
+    direct_wandb_metrics = window_size > 1 and cfg.wandb.sync_tensorboard
     run = wandb.init(
         entity=cfg.wandb.entity,
         project=cfg.wandb.project,
         config=conf,
-        sync_tensorboard=cfg.wandb.sync_tensorboard,
+        sync_tensorboard=cfg.wandb.sync_tensorboard and not direct_wandb_metrics,
         group=base_name,
         name=f"{base_name} seed={exp.seed}",
         tags=cfg.wandb.tags,
@@ -124,7 +132,7 @@ def main(cfg: DictConfig):
             weight_type=exp.weight_type or "uniform",
             weighted_critic=exp.weighted_critic,
             weight_discard_threshold=exp.weight_discard_threshold,
-            ess_decay_threshold=exp.ess_decay_threshold,
+            psr_threshold=exp.psr_threshold,
             discard_policy=exp.discard_policy or "oldest",
             clip_range_adaptation=exp.clip_range_adaptation or "none",
             rollout_buffer_class=PoserRolloutBuffer,
@@ -151,10 +159,14 @@ def main(cfg: DictConfig):
         verbose=2,
     )
 
+    callbacks = [wandb_callback, eval_callback]
+    if direct_wandb_metrics:
+        callbacks.insert(0, WandbMetricsCallback(run))
+
     model.learn(
         total_timesteps=int(exp.total_timesteps),
         progress_bar=True,
-        callback=CallbackList([wandb_callback, eval_callback]),
+        callback=CallbackList(callbacks),
     )
     env_name = str(exp.env_name).split("-")[0]
     method_name = "POSER" if window_size > 1 else "PPO"

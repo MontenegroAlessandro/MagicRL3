@@ -1,28 +1,23 @@
 """POSER: PPO with diagnostics over a window of recent rollouts."""
 
-from typing import Literal, Optional
+import copy
+from typing import Optional
 
 import numpy as np
 import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
 from stable_baselines3 import PPO
+from stable_baselines3.common.logger import Logger
 from stable_baselines3.common.utils import explained_variance, obs_as_tensor
 
-from .utils.diagnostics import (
-    advantages_by_window,
-    approx_kl,
-    clip_fraction,
-    compute_naive_ratios,
-    mean_abs_deviation,
-    normalized_ess,
-    ratio_variance,
-)
+from .utils.poser_diagnostics import critic_statistics, ratio_statistics
 
 
-WEIGHT_TYPES = ("uniform", "variance-based")
+WEIGHT_TYPES = ("uniform", "d2_rad", "d2")
+D2_WEIGHT_TYPES = ("d2_rad", "d2")
 DISCARD_POLICIES = ("oldest", "highest_decay")
-CLIP_RANGE_ADAPTATIONS = ("none", "weight_scaled")
+CLIP_RANGE_ADAPTATIONS = ("none", "weighted", "weighted_geppo")
 
 
 class POSER(PPO):
@@ -36,15 +31,15 @@ class POSER(PPO):
         weight_type: Optional[str] = None,
         weighted_critic: bool = False,
         weight_discard_threshold: Optional[float] = None,
-        ess_decay_threshold: Optional[float] = None,
+        psr_threshold: Optional[float] = None,
         discard_policy: str = "oldest",
         clip_range_adaptation: str = "none",
         **kwargs,
     ) -> None:
         if weight_type not in WEIGHT_TYPES:
             raise ValueError(f"weight_type must be one of {WEIGHT_TYPES}, got {weight_type!r}")
-        if ess_decay_threshold is not None and not (0.0 < ess_decay_threshold <= 1.0):
-            raise ValueError(f"ess_decay_threshold must be in (0, 1], got {ess_decay_threshold!r}")
+        if psr_threshold is not None and psr_threshold < 0.0:
+            raise ValueError(f"psr_threshold must be non-negative, got {psr_threshold!r}")
         if discard_policy not in DISCARD_POLICIES:
             raise ValueError(f"discard_policy must be one of {DISCARD_POLICIES}, got {discard_policy!r}")
         if clip_range_adaptation not in CLIP_RANGE_ADAPTATIONS:
@@ -56,10 +51,11 @@ class POSER(PPO):
         self.weight_type = weight_type
         self.weighted_critic = weighted_critic
         self.weight_discard_threshold = weight_discard_threshold
-        self.ess_decay_threshold = ess_decay_threshold
+        self.psr_threshold = psr_threshold
         self.discard_policy = discard_policy
         self.clip_range_adaptation = clip_range_adaptation
         self._ess_at_theta_k: Optional[th.Tensor] = None
+        self._diagnostic_step = 0
 
         super().__init__(*args, **kwargs)
         if self.use_sde:
@@ -179,7 +175,7 @@ class POSER(PPO):
     def _compute_log_mean_d2(self, rollout_data) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """Per-window log-mean of the per-sample 2-Renyi divergence pi_theta || pi_{k-i}.
 
-        Shared by the variance-based POSER weights and by ESS-decay early stopping --
+        Shared by the d2_rad POSER weights and by PSR early stopping --
         both are transforms of the same d_2 values, computed with a single forward pass.
         Returns (unique_windows, samples_per_window, log_mean_d2_by_window).
         """
@@ -221,7 +217,7 @@ class POSER(PPO):
         return unique_windows, samples_per_window, th.stack(log_mean_d2_by_window)
 
     def _compute_weights(self, rollout_data, weight_type=None) -> th.Tensor:
-        """Compute uniform or variance-based POSER weights."""
+        """Compute uniform or D2-based POSER weights."""
         weight_type = weight_type or self.weight_type
 
         windows = rollout_data.window_id.flatten()
@@ -232,23 +228,88 @@ class POSER(PPO):
             uniform_weight = 1.0 / number_of_windows
             return th.full(size=(number_of_windows,), fill_value=uniform_weight, dtype=rollout_data.behavior_mean.dtype, device=rollout_data.behavior_mean.device)
 
-        if weight_type == "variance-based":
+        if weight_type in D2_WEIGHT_TYPES:
             _, samples_per_window, log_mean_d2_by_window = self._compute_log_mean_d2(rollout_data)
-            log_sample_count = th.log(samples_per_window.to(log_mean_d2_by_window.dtype))
-            log_unnormalized_weights = 0.5 * (log_sample_count - log_mean_d2_by_window)
-            return th.softmax(log_unnormalized_weights, dim=0)
+            return self._compute_d2_weights(
+                samples_per_window, log_mean_d2_by_window, weight_type
+            )
 
         raise ValueError(f"weight_type must be one of {WEIGHT_TYPES}, got {weight_type!r}")
+
+    @staticmethod
+    def _compute_d2_weights(
+        samples_per_window: th.Tensor,
+        log_mean_d2_by_window: th.Tensor,
+        weight_type: str,
+    ) -> th.Tensor:
+        """Normalize either sqrt(N_i / d2_i) or N_i / d2_i across windows."""
+        log_sample_count = th.log(
+            samples_per_window.to(log_mean_d2_by_window.dtype)
+        )
+        log_effective_sample_size = log_sample_count - log_mean_d2_by_window
+        exponent = 0.5 if weight_type == "d2_rad" else 1.0
+        return th.softmax(exponent * log_effective_sample_size, dim=0)
+
+    @staticmethod
+    def _compute_psr_value(
+        samples_per_window: th.Tensor,
+        log_mean_d2_by_window: th.Tensor,
+        weight_type: str,
+    ) -> th.Tensor:
+        """Return sum_i w_i(theta) * sqrt(d2_i(theta) - 1).
+
+        The computation stays in log space and avoids an indeterminate zero
+        times infinity for D2-based weights when a divergence is infinite.
+        """
+        log_d2 = log_mean_d2_by_window.clamp_min(0.0)
+        # log(1 - exp(-x)); this is -inf at x=0, as required.
+        log_one_minus_inverse_d2 = th.log(-th.expm1(-log_d2))
+
+        if weight_type == "uniform":
+            log_terms = (
+                0.5 * log_d2
+                + 0.5 * log_one_minus_inverse_d2
+                - th.log(
+                    th.as_tensor(
+                        log_d2.numel(), dtype=log_d2.dtype, device=log_d2.device
+                    )
+                )
+            )
+        else:
+            log_sample_count = th.log(samples_per_window.to(log_d2.dtype))
+            exponent = 0.5 if weight_type == "d2_rad" else 1.0
+            weight_logits = exponent * (log_sample_count - log_d2)
+            log_weight_normalizer = th.logsumexp(weight_logits, dim=0)
+
+            # Combine log(weight_i) and log(sqrt(d2_i - 1)) algebraically,
+            # so d2_rad remains well-defined as log_d2 tends to infinity.
+            log_terms = exponent * log_sample_count
+            if exponent != 0.5:
+                log_terms = log_terms + (0.5 - exponent) * log_d2
+            log_terms = (
+                log_terms
+                + 0.5 * log_one_minus_inverse_d2
+                - log_weight_normalizer
+            )
+
+        return th.exp(th.logsumexp(log_terms, dim=0))
 
     def _compute_clip_ranges(
         self, clip_range: float, window_weights: th.Tensor
     ) -> th.Tensor:
-        """Return the policy clip range for each currently available window."""
+        """Return per-rollout clip ranges, ordered from newest to oldest."""
+        rollout_ages = th.arange(
+            1,
+            window_weights.numel() + 1,
+            dtype=window_weights.dtype,
+            device=window_weights.device,
+        )
         if self.clip_range_adaptation == "none":
             return th.full_like(window_weights, clip_range)
-
-        window_length = window_weights.numel()
-        return clip_range / (window_length * window_weights)
+        clip_range_step = clip_range / th.sum(window_weights * rollout_ages)
+        if self.clip_range_adaptation == "weighted_geppo":
+            return th.full_like(window_weights, clip_range_step)
+        return clip_range_step * rollout_ages
 
     def _compute_ess(self, rollout_data) -> th.Tensor:
         """Per-window effective sample size ESS_i(theta) = N_i / d_2(pi_theta || pi_{theta_k-i})."""
@@ -286,8 +347,19 @@ class POSER(PPO):
         if self.clip_range_vf is not None:
             clip_range_vf = self.clip_range_vf(self._current_progress_remaining)  # type: ignore[operator]
 
-        # Recompute historical V-trace targets before diagnostics flatten the buffer.
+        # Copy historical targets before V-trace mutates them, keeping [H, N_E]
+        # alignment. Measure the change once; these targets then stay fixed.
+        previous_targets = [rollout.returns.copy() for rollout in self.rollout_buffer.history]
         self.rollout_buffer.recompute_advantages(self.policy)
+        target_changes = {
+            window_id: float(np.sqrt(np.mean(
+                (rollout.returns.astype(np.float64) - previous.astype(np.float64)) ** 2
+            )))
+            for window_id, (previous, rollout) in enumerate(
+                zip(previous_targets, self.rollout_buffer.history), start=1
+            )
+        }
+        del previous_targets
 
         # Samples/behavior stats are fixed for this train() call; only theta moves.
         complete_rollout_data = self.rollout_buffer.get_all()
@@ -305,9 +377,8 @@ class POSER(PPO):
             adv_var = (is_weights * (complete_rollout_data.advantages - adv_mean) ** 2).sum() / total_weight
             adv_std = adv_var.sqrt() + 1e-8
 
-        # ESS_i(theta_k): the baseline every later epoch's ESS-decay check (and the
-        # diag/ess_decay/* diagnostics below) is measured against. theta_k = the
-        # policy right now, before any gradient step this call.
+        # ESS_i(theta_k): baseline for diagnostics and highest-decay eviction.
+        # theta_k is the policy right now, before any gradient step this call.
         d2_stats_at_theta_k = self._compute_log_mean_d2(complete_rollout_data)
         _, samples_per_window_at_theta_k, log_mean_d2_at_theta_k = d2_stats_at_theta_k
         self._ess_at_theta_k = (
@@ -315,58 +386,63 @@ class POSER(PPO):
             / log_mean_d2_at_theta_k.exp()
         )
 
-        # POSER diagnostics before the PPO update.
-        self._log_diagnostics(
-            clip_range,
-            "pre",
-            rollout_data=complete_rollout_data,
-            d2_stats=d2_stats_at_theta_k,
-        )
+        reference_policy = None
+        if self.clip_range_adaptation == "weighted_geppo":
+            reference_policy = copy.deepcopy(self.policy)
+            reference_policy.set_training_mode(False)
+
+        d2_stats = d2_stats_at_theta_k
 
         entropy_losses = []
         pg_losses, value_losses = [], []
         clip_fractions = []
 
-        early_stop_epoch = self.n_epochs
-        ess_decay_min = float("inf")
         discarded_window = False
-        discarded_window_id = float("nan")
+        approx_kl_divs = []
+        last_loss = float("nan")
 
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            # Recompute against the current theta once per epoch: it moved at every
-            # minibatch step of the previous epoch. Per-minibatch recomputation was
-            # tried and cost ~n_minibatches x more compute than the update itself.
-            need_d2 = self.weight_type == "variance-based" or self.ess_decay_threshold is not None
-            if need_d2:
-                if epoch == 0:
-                    _, samples_per_window, log_mean_d2_by_window = d2_stats_at_theta_k
-                else:
-                    _, samples_per_window, log_mean_d2_by_window = self._compute_log_mean_d2(complete_rollout_data)
+            # The preceding snapshot already evaluated D2 at this theta.
+            _, samples_per_window, log_mean_d2_by_window = d2_stats
 
-            if self.weight_type == "variance-based":
-                log_sample_count = th.log(samples_per_window.to(log_mean_d2_by_window.dtype))
-                window_weights = th.softmax(0.5 * (log_sample_count - log_mean_d2_by_window), dim=0)
+            if self.weight_type in D2_WEIGHT_TYPES:
+                window_weights = self._compute_d2_weights(
+                    samples_per_window, log_mean_d2_by_window, self.weight_type
+                )
             else:
                 window_weights = self._compute_weights(complete_rollout_data)
-            window_clip_ranges = self._compute_clip_ranges(clip_range, window_weights)
+            window_clip_ranges = self._compute_clip_ranges(
+                clip_range, window_weights
+            )
 
-            # ESS-decay early stopping: gates whether to enter this epoch at all: it
-            # does not interrupt one already in progress. theta here is the iterate
-            # produced by the previous epoch's updates (or theta_k, for epoch 0), so at
-            # epoch 0 decay is always exactly 1 and this can never trigger there.
-            if self.ess_decay_threshold is not None:
-                n_per_window = samples_per_window.to(log_mean_d2_by_window.dtype)
-                ess_this_epoch = n_per_window / log_mean_d2_by_window.exp()
-                decay = ess_this_epoch / self._ess_at_theta_k
-                epoch_min_decay = decay.min().item()
-                ess_decay_min = min(ess_decay_min, epoch_min_decay)
+            # PSR gates entry, including epoch zero. A blocked entry still logs
+            # candidate weights/ranges, as requested, on its own flat step.
+            psr_value = None
+            psr_triggered = False
+            if self.psr_threshold is not None:
+                psr_value = self._compute_psr_value(
+                    samples_per_window, log_mean_d2_by_window, self.weight_type
+                ).item()
+                psr_triggered = psr_value > self.psr_threshold
 
-                if epoch_min_decay < self.ess_decay_threshold:
-                    early_stop_epoch = epoch
-                    if self.verbose >= 1:
-                        print(f"ESS-decay early stopping before epoch {epoch}: min decay {epoch_min_decay:.3f} < {self.ess_decay_threshold}")
-                    break
+            if epoch == 0 or psr_triggered:
+                self._log_diagnostics(
+                    complete_rollout_data,
+                    epoch=epoch,
+                    window_weights=window_weights,
+                    window_clip_ranges=window_clip_ranges,
+                    d2_stats=d2_stats,
+                    reference_policy=reference_policy,
+                    target_changes=target_changes if epoch == 0 else None,
+                    psr_value=psr_value,
+                    psr_triggered=psr_triggered,
+                )
+            if psr_triggered:
+                if self.verbose >= 1:
+                    print(f"PSR early stopping before epoch {epoch}: "
+                          f"{psr_value:.6g} > {self.psr_threshold}")
+                break
 
             approx_kl_divs = []
             # Do a complete pass on the rollout buffer
@@ -386,16 +462,27 @@ class POSER(PPO):
                 # ratio between old and new policy, should be one at the first iteration
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
 
-                # Weighted POSER clipped surrogate: sum_i w_i L_i.
+                # Weighted POSER clipped surrogate. GePPO clips the full
+                # pi_theta/pi_behavior ratio around pi_k/pi_behavior.
                 sample_clip_ranges = window_clip_ranges[
                     rollout_data.window_id.long()
                 ]
+                clip_center = th.ones_like(ratio)
+                if reference_policy is not None:
+                    with th.no_grad():
+                        _, reference_log_prob, _ = reference_policy.evaluate_actions(
+                            rollout_data.observations, actions
+                        )
+                    clip_center = th.exp(
+                        reference_log_prob - rollout_data.old_log_prob
+                    )
                 policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * th.clamp(
+                clipped_ratio = th.clamp(
                     ratio,
-                    1 - sample_clip_ranges,
-                    1 + sample_clip_ranges,
+                    clip_center - sample_clip_ranges,
+                    clip_center + sample_clip_ranges,
                 )
+                policy_loss_2 = advantages * clipped_ratio
                 clipped_objective = th.min(policy_loss_1, policy_loss_2)
                 unique_windows = th.unique(rollout_data.window_id, sorted=True)
                 batch_window_weights = window_weights[unique_windows.long()]
@@ -408,7 +495,7 @@ class POSER(PPO):
                 # Logging
                 pg_losses.append(policy_loss.item())
                 clip_fraction_value = th.mean(
-                    (th.abs(ratio - 1) > sample_clip_ranges).float()
+                    (th.abs(ratio - clip_center) > sample_clip_ranges).float()
                 ).item()
                 clip_fractions.append(clip_fraction_value)
 
@@ -444,9 +531,10 @@ class POSER(PPO):
                 entropy_losses.append(entropy_loss.item())
 
                 loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+                last_loss = loss.item()
 
                 # Approximate reverse KL divergence, logged as train/approx_kl below.
-                # Stopping is handled entirely by ESS-decay above, not by this: see
+                # Stopping is handled entirely by PSR above, not by this: see
                 # issue #417 / PR #419 on DLR-RM/stable-baselines3 and Schulman's blog
                 # (http://joschu.net/blog/kl-approx.html) for the estimator itself.
                 with th.no_grad():
@@ -462,20 +550,23 @@ class POSER(PPO):
                 self.policy.optimizer.step()
 
             self._n_updates += 1
+            # Measure the updated policy with the weights and bounds just used,
+            # before any window is discarded. Reuse D2 for the next epoch.
+            d2_stats = self._log_diagnostics(
+                complete_rollout_data,
+                epoch=epoch + 1,
+                window_weights=window_weights,
+                window_clip_ranges=window_clip_ranges,
+                reference_policy=reference_policy,
+            )
 
         # Window-discard policy: fires only once the window is at capacity, matching
         # the exact point reset()'s own maxlen rotation would otherwise trigger --
         # never during warm-up (n_rollouts < window_size), where nothing should be
         # evicted yet. Runs regardless of how the epoch loop ended (early stop or all
-        # n_epochs completed), and independently of ess_decay_threshold: discard_policy
-        # governs which window gets evicted whether or not early stopping is enabled --
-        # gating this on ess_decay_threshold too would silently fall back to the
-        # buffer's own FIFO eviction (i.e. "oldest") whenever early stopping is off,
-        # ignoring an explicit discard_policy="highest_decay". "oldest" reproduces the
-        # natural FIFO rotation exactly (a no-op relative to letting reset() handle
-        # it); "highest_decay" instead evicts by decay_i(theta) = ESS_i(theta) /
-        # ESS_i(theta_k) at this exact exit point (freshly computed, not reused from
-        # the loop above), the same quantity the stopping check above uses.
+        # n_epochs completed), and independently of PSR early stopping. "oldest"
+        # reproduces the natural FIFO rotation; "highest_decay" evicts by
+        # decay_i(theta) = ESS_i(theta) / ESS_i(theta_k) at this exact exit point.
         if self.rollout_buffer.n_rollouts >= self.rollout_buffer.window_size:
             if self.discard_policy == "oldest":
                 window_to_discard = self.rollout_buffer.n_rollouts - 1
@@ -491,7 +582,6 @@ class POSER(PPO):
             discarded_window = window_to_discard > 0
             if discarded_window:
                 self.rollout_buffer.discard_window(window_to_discard)
-                discarded_window_id = float(window_to_discard)
             if self.verbose >= 1:
                 outcome = f"discarded window {window_to_discard}" if discarded_window else "window 0 has the least ESS, nothing to discard"
                 print(f"POSER window management (policy={self.discard_policy}): {outcome}")
@@ -501,13 +591,15 @@ class POSER(PPO):
             self.rollout_buffer.returns.flatten(),
         )
 
-        # Logs
-        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
-        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
-        self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
-        self.logger.record("train/loss", loss.item())
+        # Logs. An epoch-0 stop legitimately leaves all minibatch lists empty.
+        def mean_or_nan(values):
+            return np.mean(values) if values else float("nan")
+        self.logger.record("train/entropy_loss", mean_or_nan(entropy_losses))
+        self.logger.record("train/policy_gradient_loss", mean_or_nan(pg_losses))
+        self.logger.record("train/value_loss", mean_or_nan(value_losses))
+        self.logger.record("train/approx_kl", mean_or_nan(approx_kl_divs))
+        self.logger.record("train/clip_fraction", mean_or_nan(clip_fractions))
+        self.logger.record("train/loss", last_loss)
         self.logger.record("train/explained_variance", explained_var)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
@@ -517,82 +609,92 @@ class POSER(PPO):
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
 
-        self.logger.record("train/early_stop_epoch", early_stop_epoch)
-        self.logger.record("train/ess_decay_min", ess_decay_min if ess_decay_min != float("inf") else float("nan"))
-        self.logger.record("train/discarded_window", discarded_window)
-        self.logger.record("train/discarded_window_id", discarded_window_id)
-
-        # POSER diagnostics after the PPO update.
-        self._log_diagnostics(clip_range, "post")
-
-
-
+    @th.no_grad()
     def _log_diagnostics(
         self,
-        clip_range: float,
-        stage: Literal["pre", "post"],
-        rollout_data=None,
+        rollout_data,
+        *,
+        epoch: int,
+        window_weights: th.Tensor,
+        window_clip_ranges: th.Tensor,
         d2_stats=None,
-    ) -> None:
-        """Log ratio diagnostics and, before training, advantage diagnostics."""
+        reference_policy=None,
+        target_changes: Optional[dict[int, float]] = None,
+        psr_value: Optional[float] = None,
+        psr_triggered: bool = False,
+    ):
+        """Dump one full-window snapshot without flushing pending SB3 metrics.
 
-        if rollout_data is None:
-            rollout_data = self.rollout_buffer.get_all()
-        if d2_stats is None:
-            d2_stats = self._compute_log_mean_d2(rollout_data)
-        _, samples_per_window, log_mean_d2_by_window = d2_stats
+        Epoch zero and PSR-blocked entries use candidate weights/bounds; completed
+        epochs use the frozen weights/bounds actually used by the optimizer.
+        Raw D2, its square root and ESS describe the snapshot's policy.
+        """
+        was_training = self.policy.training
+        self.policy.set_training_mode(False)
+        try:
+            if d2_stats is None:
+                d2_stats = self._compute_log_mean_d2(rollout_data)
+            windows, counts, log_d2 = d2_stats
+            actions = rollout_data.actions
+            if isinstance(self.action_space, spaces.Discrete):
+                actions = actions.long().flatten()
+            values, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+            log_ratio = log_prob - rollout_data.old_log_prob
+            clip_center = th.ones_like(log_ratio)
+            if reference_policy is not None:
+                _, reference_log_prob, _ = reference_policy.evaluate_actions(
+                    rollout_data.observations, actions
+                )
+                clip_center = (reference_log_prob - rollout_data.old_log_prob).exp()
+        finally:
+            self.policy.set_training_mode(was_training)
 
-        # Weight and ESS diagnostics are transforms of the same D_2 forward pass.
-        log_sample_count = th.log(
-            samples_per_window.to(log_mean_d2_by_window.dtype)
-        )
-        window_weights_variance = th.softmax(
-            0.5 * (log_sample_count - log_mean_d2_by_window), dim=0
-        )
-        window_weights = (
-            window_weights_variance
-            if self.weight_type == "variance-based"
-            else self._compute_weights(rollout_data)
-        )
-        window_clip_ranges = self._compute_clip_ranges(clip_range, window_weights)
+        # A separate record buffer shares the configured writers, but does not own
+        # or close them. Standard SB3 keys remain pending at their usual env step.
+        diagnostic_logger = Logger(self.logger.dir, self.logger.output_formats)
+        diagnostic_logger.set_level(self.logger.level)
+        record = diagnostic_logger.record
+        record("diag/time/epoch", epoch)
+        record("diag/time/flat_step", self._diagnostic_step)
+        record("diag/time/env_step", self.num_timesteps)
 
-        for window_id, weight in enumerate(window_weights_variance):
-            self.logger.record(f"diag/weight/variance_based/{stage}_w{window_id}", weight.item())
-        for window_id, window_clip_range in enumerate(window_clip_ranges):
-            self.logger.record(
-                f"diag/clip_range/{stage}_w{window_id}",
-                window_clip_range.item(),
-            )
-
-        # ESS-decay diagnostics: ESS_i(theta) / ESS_i(theta_k), 1.0 everywhere at "pre"
-        # by construction (no gradient step has moved theta away from theta_k yet).
-        ess = samples_per_window.to(log_mean_d2_by_window.dtype) / log_mean_d2_by_window.exp()
-        ess_decay = ess / self._ess_at_theta_k
-        for window_id, decay in enumerate(ess_decay):
-            self.logger.record(f"diag/ess_decay/{stage}_w{window_id}", decay.item())
-
-        # ratio diagnostics
-        ratios = compute_naive_ratios(self.policy, rollout_data, self.action_space)
-
+        # Exponentiate in double precision; sqrt(D) is computed directly from
+        # log(D), so it can remain finite even when D itself overflows.
+        diagnostic_log_d2 = log_d2.double()
         window_ids = rollout_data.window_id.long()
-        unique_windows = th.unique(window_ids, sorted=True)
-        subsets = {
-            f"w{window_id.item()}": ratios[window_ids == window_id]
-            for window_id in unique_windows
-        }
-        subsets["mean"] = ratios
+        sample_ranges = window_clip_ranges[window_ids]
+        for index, window in enumerate(windows):
+            window_id = int(window.item())
+            suffix = f"w{window_id:02d}"
+            mask = window_ids == window_id
+            record(f"diag/d2_rad/{suffix}", (0.5 * diagnostic_log_d2[index]).exp().item())
+            record(f"diag/d2/{suffix}", diagnostic_log_d2[index].exp().item())
+            record(f"diag/weight/{suffix}", window_weights[window_id].item())
+            record(f"diag/clip_range/{suffix}", window_clip_ranges[window_id].item())
+            record(f"diag/ess_analytic/{suffix}", (-log_d2[index]).exp().item())
+            stats = ratio_statistics(log_ratio[mask], clip_center[mask], sample_ranges[mask])
+            for name, value in stats.items():
+                record(f"diag/{name}/{suffix}", value)
+            stats = critic_statistics(
+                values.flatten()[mask], rollout_data.returns[mask], min_target_variance=1e-8
+            )
+            for name, value in stats.items():
+                record(f"diag/critic/{name}/{suffix}", value)
 
-        for suffix, ratio in subsets.items():
-            if suffix == "mean":
-                diagnostic_clip_range = window_clip_ranges[window_ids]
-            else:
-                window_id = int(suffix[1:])
-                diagnostic_clip_range = window_clip_ranges[window_id]
-            self.logger.record(f"diag/clip_fraction/{stage}_{suffix}", clip_fraction(ratio, diagnostic_clip_range).item())
-            self.logger.record(f"diag/approx_kl/{stage}_{suffix}", approx_kl(ratio).item())
-            self.logger.record(f"diag/abs_ratio/{stage}_{suffix}", mean_abs_deviation(ratio).item())
-            self.logger.record(f"diag/normalized_ess/{stage}_{suffix}", normalized_ess(ratio).item())
-            self.logger.record(f"diag/ratio_variance/{stage}_{suffix}", ratio_variance(ratio).item())
+        global_stats = ratio_statistics(log_ratio, clip_center, sample_ranges)
+        for name in ("abs_eps", "clip_fraction"):
+            record(f"diag/{name}/global", global_stats[name])
+        for name in ("ratio_variance", "clipped_ratio_variance"):
+            record(f"diag/{name}", global_stats[name])
+        if target_changes is not None:
+            for window_id, value in target_changes.items():
+                record(f"diag/critic/vtrace_target_change_rms/w{window_id:02d}", value)
+        # Observe PSR even when its stopping gate is disabled.
+        if psr_value is None:
+            psr_value = self._compute_psr_value(counts, log_d2, self.weight_type).item()
+        record("diag/psr_value", psr_value)
+        record("diag/psr_triggered", int(psr_triggered))
 
-
-
+        diagnostic_logger.dump(step=self._diagnostic_step)
+        self._diagnostic_step += 1
+        return d2_stats
