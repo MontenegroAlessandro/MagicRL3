@@ -157,7 +157,10 @@ class PolicyGradient(TrajectoryOnPolicyAlgorithm):
             self.policy.optimizer.step()
 
         self._n_updates += 1
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        # Not excluded from tensorboard (unlike most "info" fields): this needs to be a
+        # real synced metric so wandb can plot other train/* curves against it as a custom
+        # x-axis (parameter updates rather than env timesteps).
+        self.logger.record("train/n_updates", self._n_updates)
         self.logger.record("train/policy_loss", policy_loss.item())
         self.logger.record("train/entropy_loss", entropy_loss.item())
         self.logger.record("train/mean_return", G.mean().item())
