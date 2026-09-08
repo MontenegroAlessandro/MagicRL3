@@ -115,6 +115,17 @@ def main(cfg: DictConfig):
         tags=cfg.wandb.tags,
     )
 
+    # sync_tensorboard bundles every scalar from one logger.dump() call into a single
+    # wandb.log(), so train/n_updates (resp. eval/n_updates) is always logged alongside
+    # the other train/* (resp. eval/*) metrics from that same call -- define it as their
+    # default x-axis so those charts plot against parameter updates out of the box,
+    # without needing to hand-edit each panel's x-axis in the wandb UI. The usual
+    # timesteps/global_step axis stays available too; this only changes the default.
+    wandb.define_metric("train/n_updates")
+    wandb.define_metric("train/*", step_metric="train/n_updates")
+    wandb.define_metric("eval/n_updates")
+    wandb.define_metric("eval/*", step_metric="eval/n_updates")
+
     # --- Training env ---
     env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
 
