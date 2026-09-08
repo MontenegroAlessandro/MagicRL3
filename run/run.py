@@ -9,6 +9,7 @@ from wandb.integration.sb3 import WandbCallback
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import torch.nn as nn
+import torch as th
 
 import sys
 import os
@@ -16,6 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import envs  # triggers the registration of new envs
 from algorithms import PolicyGradient, FDPG
 from callbacks.trajectory_eval_callback import TrajectoryEvalCallback
+from callbacks.accurate_progress_bar_callback import AccurateProgressBarCallback
 
 ALGOS = ("reinforce", "gpomdp", "fdpg")
 
@@ -124,7 +126,7 @@ def main(cfg: DictConfig):
     # for FDPG would desync the reference rollout (normalized obs/reward) from the
     # perturbed one (raw obs/reward), corrupting the g-b estimator. So normalization
     # is only applied for algos that don't have that side pool.
-    use_vecnormalize = exp.algo.name != "fdpg"
+    use_vecnormalize = exp.algo.name != "fdpg" and (exp.normalize_obs or exp.normalize_reward)
     if use_vecnormalize:
         env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=True)
         # shares obs stats, never normalizes rewards
@@ -138,6 +140,8 @@ def main(cfg: DictConfig):
         )
 
     # Parse policy kwargs (activation_fn must be converted from string to class)
+    if exp.algo.sigma is not None:
+        exp.policy_kwargs.log_std_init = float(th.log(th.tensor(exp.algo.sigma)))
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
     if policy_kwargs is not None and "activation_fn" in policy_kwargs:
         activation_map = {
@@ -178,14 +182,19 @@ def main(cfg: DictConfig):
         verbose=2,
     )
 
+    # SB3's built-in progress_bar=True assumes one on_step() call == num_envs real
+    # timesteps, which FDPG breaks (perturbed-rollout steps bypass on_step()) --
+    # use our own bar that tracks num_timesteps directly instead.
+    progress_bar_callback = AccurateProgressBarCallback()
+
     if exp.eval_freq is not None:
-        callbacks = CallbackList([eval_callback, wandb_callback])
+        callbacks = CallbackList([eval_callback, wandb_callback, progress_bar_callback])
     else:
-        callbacks = CallbackList([wandb_callback])
+        callbacks = CallbackList([wandb_callback, progress_bar_callback])
 
     model.learn(
         total_timesteps=int(exp.total_timesteps),
-        progress_bar=True,
+        progress_bar=False,
         callback=callbacks,
     )
 

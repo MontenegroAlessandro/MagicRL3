@@ -2,3 +2,4 @@ name: gpomdp
 
 ent_coef: 0.0
 normalize_returns: false
+sigma: null

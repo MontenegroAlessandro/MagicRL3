@@ -10,14 +10,14 @@ wandb:
 experiment:
   # Environment
   env_name: Swimmer-v5
-  n_envs: 20
+  n_envs: 10
   total_timesteps: 5_000_000
   dir_name: results
   render: false
   # normalize_obs/normalize_reward only apply to REINFORCE. FDPG's perturbed-env pool
   # bypasses VecNormalize (see run.py), so these are ignored (with a warning) when
   # algo=fdpg -- normalizing would desync the perturbed rollouts from the reference one.
-  normalize_obs: true
+  normalize_obs: false
   normalize_reward: false
 
   # Shared policy-gradient hyperparameters (algo-specific ones live under algo:)
@@ -40,7 +40,7 @@ experiment:
 
   # Policy architecture
   policy_kwargs:
-    net_arch: [64, 64]
+    net_arch: [32,32]
     activation_fn: tanh
     log_std_init: 0.0
     ortho_init: true

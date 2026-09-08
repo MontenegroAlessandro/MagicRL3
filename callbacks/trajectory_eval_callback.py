@@ -60,21 +60,45 @@ class TrajectoryEvalCallback(EventCallback):
         self.eval_env = eval_env
         self.eval_freq = eval_freq
         self.deterministic = deterministic
+        self._last_eval_timestep = None
+
+    def _evaluate(self) -> None:
+        returns = collect_discounted_returns(
+            self.model, self.eval_env, n_steps=self.model.n_steps, deterministic=self.deterministic,
+        )
+        mean_return, std_return = float(returns.mean()), float(returns.std())
+
+        if self.verbose >= 1:
+            print(f"Eval num_timesteps={self.num_timesteps}, "
+                  f"mean_discounted_return={mean_return:.2f} +/- {std_return:.2f}")
+
+        self.logger.record("eval/mean_discounted_return", mean_return)
+        self.logger.record("eval/std_discounted_return", std_return)
+        self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
+        self.logger.dump(self.num_timesteps)
+
+        self._last_eval_timestep = self.num_timesteps
+
+    def _on_training_start(self) -> None:
+        if self.eval_freq > 0:
+            self._evaluate()
 
     def _on_step(self) -> bool:
-        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-            returns = collect_discounted_returns(
-                self.model, self.eval_env, n_steps=self.model.n_steps, deterministic=self.deterministic,
-            )
-            mean_return, std_return = float(returns.mean()), float(returns.std())
-
-            if self.verbose >= 1:
-                print(f"Eval num_timesteps={self.num_timesteps}, "
-                      f"mean_discounted_return={mean_return:.2f} +/- {std_return:.2f}")
-
-            self.logger.record("eval/mean_discounted_return", mean_return)
-            self.logger.record("eval/std_discounted_return", std_return)
-            self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
-            self.logger.dump(self.num_timesteps)
+        # `num_timesteps` can jump by more than one environment step per call
+        # (vectorized envs, and algorithms like FDPG that fold extra rollout
+        # batches into num_timesteps without a matching on_step() call), so we
+        # can't check for an exact multiple of eval_freq — instead fire as soon
+        # as we've advanced eval_freq steps since the last evaluation.
+        if self.eval_freq > 0 and self.num_timesteps - self._last_eval_timestep >= self.eval_freq:
+            self._evaluate()
 
         return True
+
+    def _on_training_end(self) -> None:
+        # self.num_timesteps is only kept in sync with self.model.num_timesteps
+        # inside on_step(); algorithms that fold extra steps into num_timesteps
+        # outside of on_step() (e.g. FDPG's perturbed rollouts) can leave it
+        # stale by the time training stops, so resync before deciding.
+        self.num_timesteps = self.model.num_timesteps
+        if self.eval_freq > 0 and self.num_timesteps != self._last_eval_timestep:
+            self._evaluate()
