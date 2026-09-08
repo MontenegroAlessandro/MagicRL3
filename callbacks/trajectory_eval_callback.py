@@ -75,6 +75,9 @@ class TrajectoryEvalCallback(EventCallback):
         self.logger.record("eval/mean_discounted_return", mean_return)
         self.logger.record("eval/std_discounted_return", std_return)
         self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
+        # Synced (not excluded from tensorboard) so eval/* curves can also be plotted
+        # against parameter updates rather than env timesteps, same as train/n_updates.
+        self.logger.record("eval/n_updates", self.model._n_updates)
         self.logger.dump(self.num_timesteps)
 
         self._last_eval_timestep = self.num_timesteps
