@@ -100,9 +100,13 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
 
 @hydra.main(version_base=None, config_path=".", config_name="conf")
 def main(cfg: DictConfig):
+
     exp = cfg.experiment
 
     base_name = build_run_name(exp)
+
+    if exp.algo.name == "fdpg" and exp.mode == "trajectory" and exp.sampling_strategy == "trajectory":
+        return
 
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
