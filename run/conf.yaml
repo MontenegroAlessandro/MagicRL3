@@ -43,5 +43,5 @@ experiment:
     net_arch: [32,32]
     activation_fn: tanh
     log_std_init: 0.0
-    ortho_init: true
+    ortho_init: false
     learn_std: false
