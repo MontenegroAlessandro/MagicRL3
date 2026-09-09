@@ -105,7 +105,7 @@ def main(cfg: DictConfig):
 
     base_name = build_run_name(exp)
 
-    if exp.algo.name == "fdpg" and exp.mode == "trajectory" and exp.sampling_strategy == "trajectory":
+    if exp.algo.name == "fdpg" and exp.algo.mode == "trajectory" and exp.algo.sampling_strategy == "trajectory":
         return
 
     conf = OmegaConf.to_container(cfg, resolve=True)
