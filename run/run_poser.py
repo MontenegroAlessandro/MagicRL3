@@ -67,7 +67,8 @@ def main(cfg: DictConfig):
         n_minibatch_effective = exp.n_minibatches
 
     # logger
-    if window_size > 1:
+    # if window_size > 1:
+    if window_size >= 1:
         sampling = exp.batch_sampling
         psr_label = exp.psr_threshold if exp.psr_threshold is not None else "off"
         base_name = (
@@ -143,7 +144,8 @@ def main(cfg: DictConfig):
     )
 
     # --- Model selection ---
-    if window_size == 1:
+    # if window_size == 1:
+    if window_size < 1:
         model = MyPPO(**PPO_config)
     else:
         model = POSER(
@@ -158,6 +160,7 @@ def main(cfg: DictConfig):
                 window_size=window_size,
                 batch_sampling=exp.batch_sampling or "balanced",
             ),
+            debug=exp.debug,
             **PPO_config,
         )
 

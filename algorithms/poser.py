@@ -34,6 +34,7 @@ class POSER(PPO):
         psr_threshold: Optional[float] = None,
         discard_policy: str = "oldest",
         clip_range_adaptation: str = "none",
+        debug: bool = False,
         **kwargs,
     ) -> None:
         if weight_type not in WEIGHT_TYPES:
@@ -54,6 +55,7 @@ class POSER(PPO):
         self.psr_threshold = psr_threshold
         self.discard_policy = discard_policy
         self.clip_range_adaptation = clip_range_adaptation
+        self.debug = debug
         self._ess_at_theta_k: Optional[th.Tensor] = None
         self._diagnostic_step = 0
 
@@ -608,6 +610,9 @@ class POSER(PPO):
         self.logger.record("train/clip_range", clip_range)
         if self.clip_range_vf is not None:
             self.logger.record("train/clip_range_vf", clip_range_vf)
+        if self.debug:
+            _, _, final_log_d2 = d2_stats
+            self.logger.record("train/normalized_ess", (-final_log_d2).exp().mean().item())
 
     @th.no_grad()
     def _log_diagnostics(
@@ -694,6 +699,8 @@ class POSER(PPO):
             psr_value = self._compute_psr_value(counts, log_d2, self.weight_type).item()
         record("diag/psr_value", psr_value)
         record("diag/psr_triggered", int(psr_triggered))
+        if self.debug:
+            record("diag/normalized_ess", (-log_d2).exp().mean().item())
 
         diagnostic_logger.dump(step=self._diagnostic_step)
         self._diagnostic_step += 1

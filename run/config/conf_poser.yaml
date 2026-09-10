@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 wandb:
-  project: poser
+  project: poser-debug
   entity: alessandro-montenegro-polimi
   sync_tensorboard: true
   tags: []
@@ -14,6 +14,7 @@ experiment:
   extra_name: null  # if not null it will be appended to the default name
   dir_name: results
   render: false
+  debug: false
 
   # SB3 plumbing shared across environments
   rollout_buffer_class: null
