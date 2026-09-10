@@ -16,6 +16,21 @@ import envs
 from buffers.poser_rollout_buffer import PoserRolloutBuffer
 import torch.nn as nn
 
+WANDB_LABEL_MAX_LENGTH = 128
+
+
+def _wandb_group_and_name(base_name: str, seed) -> tuple[str, str]:
+    """Fit base_name within W&B's 128-char GroupName/Name limits, keeping the seed visible.
+
+    Truncates base_name (not the seed suffix) so the run name always ends in "seed=<n>",
+    and the group (which drops the suffix) stays a prefix of the run name.
+    """
+    seed_suffix = f" seed={seed}"
+    budget = WANDB_LABEL_MAX_LENGTH - len(seed_suffix)
+    group = base_name if len(base_name) <= budget else base_name[:budget]
+    return group, group + seed_suffix
+
+
 ACTIVATION_FN = {
     "relu": nn.ReLU,
     "tanh": nn.Tanh,
@@ -60,7 +75,8 @@ def main(cfg: DictConfig):
             f"(Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} "
             f"(n_b,b_s)=({n_minibatch_effective},{batch_size}) "
             f"psr={psr_label} disc={exp.discard_policy or 'oldest'} "
-            f"clip_adapt={exp.clip_range_adaptation or 'none'}"
+            f"clip_adapt={exp.clip_range_adaptation or 'none'} "
+            f"clip={exp.clip_range}"
         )
     else:
         base_name = f"MyPPO (Ne,H)=({exp.n_envs},{exp.n_steps}) K={exp.n_epochs} (n_b,b_s)=({n_minibatch_effective},{batch_size})"
@@ -70,8 +86,10 @@ def main(cfg: DictConfig):
     if exp.name is not None:
         base_name = exp.name
 
+    group_name, run_name = _wandb_group_and_name(base_name, exp.seed)
+
     conf = OmegaConf.to_container(cfg, resolve=True)
-    conf["group"] = base_name
+    conf["group"] = group_name
     # POSER dumps two clocks into TensorBoard. Send its metrics directly to W&B
     # so tensorboard synchronization cannot merge unrelated rows.
     direct_wandb_metrics = window_size > 1 and cfg.wandb.sync_tensorboard
@@ -80,8 +98,8 @@ def main(cfg: DictConfig):
         project=cfg.wandb.project,
         config=conf,
         sync_tensorboard=cfg.wandb.sync_tensorboard and not direct_wandb_metrics,
-        group=base_name,
-        name=f"{base_name} seed={exp.seed}",
+        group=group_name,
+        name=run_name,
         tags=cfg.wandb.tags,
         dir=exp.dir_name,
     )
