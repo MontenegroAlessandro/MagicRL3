@@ -27,14 +27,12 @@ def build_run_name(exp) -> str:
     if algo.name == "reinforce":
         return (
             f"REINFORCE Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} "
-            f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma}"
         )
     elif algo.name == "gpomdp":
         return (
             f"GPOMDP Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} "
-            f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma}"
         )
     elif algo.name == "fdpg":
         return (
