@@ -2,6 +2,15 @@ defaults:
   - algo@experiment.algo: reinforce
   - _self_
 
+# Hydra >=1.2 defaults job.chdir to False, so the script no longer runs from a
+# fresh per-run output directory. Without this, every run (and every job inside
+# a -m sweep) keeps the launch cwd, so the relative experiment.dir_name below
+# resolves to the same absolute folder for all of them, flattening every run's
+# output together instead of isolating it per run/job.
+hydra:
+  job:
+    chdir: true
+
 wandb:
   project: det-pg
   sync_tensorboard: true

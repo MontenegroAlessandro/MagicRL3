@@ -7,13 +7,19 @@ from stable_baselines3.common.callbacks import EvalCallback, CallbackList
 import wandb
 from wandb.integration.sb3 import WandbCallback
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 import torch.nn as nn
 import torch as th
 
+import subprocess
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(_REPO_ROOT)
+# Re-exec'd job subprocesses (see main()) start fresh and need this on PYTHONPATH
+# too, since a runtime sys.path edit like the one above isn't inherited by children.
+os.environ["PYTHONPATH"] = _REPO_ROOT + os.pathsep + os.environ.get("PYTHONPATH", "")
 import envs  # triggers the registration of new envs
 from algorithms import PolicyGradient, FDPG
 from callbacks.trajectory_eval_callback import TrajectoryEvalCallback
@@ -101,10 +107,36 @@ def main(cfg: DictConfig):
 
     exp = cfg.experiment
 
-    base_name = build_run_name(exp)
-
     if exp.algo.name == "fdpg" and exp.algo.mode == "trajectory" and exp.algo.sampling_strategy == "trajectory":
         return
+
+    if os.environ.get("_RUN_PY_WORKER") != "1":
+        # Hydra's -m sweep runs every job sequentially inside ONE Python process (true
+        # even with a process-pool launcher plugin -- worker processes get reused
+        # across jobs, not spawned fresh per job). wandb's sync_tensorboard integration
+        # is not reliable across repeated wandb.init()/finish() cycles in one process:
+        # jobs after the first can silently lose ALL their logged metrics even though
+        # the run itself gets created. This isn't a monkeypatch-state bug we can fix
+        # from here -- wandb's own patch bookkeeping and wandb.run were both verified
+        # to reset correctly between jobs, yet the metrics still never arrived, so the
+        # fault is in wandb's shared backend service, not anything visible at the
+        # Python level. Re-executing this exact job as a fresh subprocess sidesteps the
+        # whole bug class by construction, while keeping -m's single-command sequential
+        # sweep and live terminal output (stdout/stderr are inherited directly here,
+        # unlike a launcher plugin that redirects each job's output to a log file).
+        overrides = list(HydraConfig.get().overrides.task)
+        worker_env = os.environ.copy()
+        worker_env["_RUN_PY_WORKER"] = "1"
+        result = subprocess.run(
+            [sys.executable, __file__] + overrides
+            + ["hydra.run.dir=.", "hydra.job.chdir=false", "hydra.output_subdir=null"],
+            env=worker_env,
+        )
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+        return
+
+    base_name = build_run_name(exp)
 
     conf = OmegaConf.to_container(cfg, resolve=True)
     conf["group"] = base_name
