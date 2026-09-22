@@ -21,11 +21,11 @@ sys.path.append(_REPO_ROOT)
 # too, since a runtime sys.path edit like the one above isn't inherited by children.
 os.environ["PYTHONPATH"] = _REPO_ROOT + os.pathsep + os.environ.get("PYTHONPATH", "")
 import envs  # triggers the registration of new envs
-from algorithms import PolicyGradient, FDPG
+from algorithms import PolicyGradient, FDPG, BastaniFD, ZDPG
 from callbacks.trajectory_eval_callback import TrajectoryEvalCallback
 from callbacks.accurate_progress_bar_callback import AccurateProgressBarCallback
 
-ALGOS = ("reinforce", "gpomdp", "fdpg")
+ALGOS = ("reinforce", "gpomdp", "fdpg", "bastani_fd", "zdpg")
 
 
 def build_run_name(exp) -> str:
@@ -46,12 +46,25 @@ def build_run_name(exp) -> str:
             f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} "
             f"{algo.sampling_mode}/{algo.sampling_strategy}"
         )
+    elif algo.name == "bastani_fd":
+        return (
+            f"BastaniFD-{algo.mode} Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} λ={algo.fd_step} "
+            f"Nd={algo.n_directions} crn={algo.use_crn}"
+        )
+    elif algo.name == "zdpg":
+        return (
+            f"{'ZDPG-S' if algo.mode == 'symmetric' else 'ZDPG'} Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} µ={algo.mu} "
+            f"N={algo.n_rollouts} crn={algo.use_crn}"
+        )
     else:
         raise ValueError(f"Unknown experiment.algo.name '{algo.name}'. Choose from: {ALGOS}")
 
 
-def build_model(exp, env, policy_kwargs, tensorboard_log):
+def build_model(exp, env, policy_kwargs, tensorboard_log, env_kwargs=None):
     algo = exp.algo
+    env_kwargs = dict(env_kwargs or {})
     if algo.name in ["reinforce", "gpomdp"]:
         return PolicyGradient(
             g_estimator=algo.name,
@@ -63,6 +76,52 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
             max_grad_norm=exp.max_grad_norm,
             ent_coef=algo.ent_coef,
             normalize_returns=algo.normalize_returns,
+            use_sde=exp.use_sde,
+            sde_sample_freq=exp.sde_sample_freq,
+            stats_window_size=exp.stats_window_size,
+            policy_kwargs=policy_kwargs,
+            verbose=exp.verbose,
+            tensorboard_log=tensorboard_log,
+            seed=exp.seed,
+            device=exp.device,
+        )
+    elif algo.name == "bastani_fd":
+        return BastaniFD(
+            policy=exp.policy_type,
+            env=env,
+            learning_rate=exp.learning_rate,
+            n_steps=exp.n_steps,
+            gamma=exp.gamma,
+            fd_step=algo.fd_step,
+            mode=algo.mode,
+            n_directions=algo.n_directions,
+            use_crn=algo.use_crn,
+            max_grad_norm=exp.max_grad_norm,
+            use_sde=exp.use_sde,
+            sde_sample_freq=exp.sde_sample_freq,
+            stats_window_size=exp.stats_window_size,
+            policy_kwargs=policy_kwargs,
+            verbose=exp.verbose,
+            tensorboard_log=tensorboard_log,
+            seed=exp.seed,
+            device=exp.device,
+        )
+    elif algo.name == "zdpg":
+        return ZDPG(
+            policy=exp.policy_type,
+            env=env,
+            learning_rate=exp.learning_rate,
+            n_steps=exp.n_steps,
+            gamma=exp.gamma,
+            mu=algo.mu,
+            n_rollouts=algo.n_rollouts,
+            mode=algo.mode,
+            use_crn=algo.use_crn,
+            # ZDPG restarts the system at the sampled states to evaluate the Q-function,
+            # which needs its own pool of environments built from the same id and kwargs.
+            env_id=exp.env_name,
+            env_kwargs=env_kwargs,
+            max_grad_norm=exp.max_grad_norm,
             use_sde=exp.use_sde,
             sde_sample_freq=exp.sde_sample_freq,
             stats_window_size=exp.stats_window_size,
@@ -88,6 +147,7 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
             sampling_mode=algo.sampling_mode,
             sampling_strategy=algo.sampling_strategy,
             env_id=exp.env_name,
+            env_kwargs=env_kwargs,
             max_grad_norm=exp.max_grad_norm,
             use_sde=exp.use_sde,
             sde_sample_freq=exp.sde_sample_freq,
@@ -160,28 +220,45 @@ def main(cfg: DictConfig):
     wandb.define_metric("eval/n_updates")
     wandb.define_metric("eval/*", step_metric="eval/n_updates")
 
+    # Extra constructor arguments for the environment (dimensions, noise, time limit,
+    # ... for parametric envs such as LQ-v0). Every env of the run uses the same ones.
+    env_kwargs = OmegaConf.to_container(exp.env_kwargs, resolve=True) if exp.env_kwargs else {}
+
     # --- Training env ---
-    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
+    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed, env_kwargs=env_kwargs)
 
     # --- Evaluation env ---
-    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_episodes, seed=exp.seed + 1000)
+    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_episodes, seed=exp.seed + 1000,
+                            env_kwargs=env_kwargs)
 
     # FDPG builds its own perturbed-env pool internally via raw gym.make() (see
     # FDPG._setup_model), bypassing VecNormalize. Wrapping the main env in VecNormalize
     # for FDPG would desync the reference rollout (normalized obs/reward) from the
     # perturbed one (raw obs/reward), corrupting the g-b estimator. So normalization
-    # is only applied for algos that don't have that side pool.
-    use_vecnormalize = exp.algo.name != "fdpg" and (exp.normalize_obs or exp.normalize_reward)
+    # is only applied for algos that don't have that side pool. The same holds for
+    # ZDPG, whose Q-sampling pool must reproduce the reference states exactly.
+    # BastaniFD also needs fixed observation/reward transforms across every +/-
+    # evaluation; online normalization would change the objective during finite
+    # differences.
+    use_vecnormalize = exp.algo.name not in ("fdpg", "bastani_fd", "zdpg") and (exp.normalize_obs or exp.normalize_reward)
     if use_vecnormalize:
         env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=True)
         # shares obs stats, never normalizes rewards
         eval_env = VecNormalize(eval_env, norm_reward=False, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=False)
         eval_env.obs_rms = env.obs_rms
     elif exp.normalize_obs or exp.normalize_reward:
-        warnings.warn(
-            f"experiment.normalize_obs/normalize_reward are ignored for algo='{exp.algo.name}': "
+        reason = (
+            "observation/reward transforms must stay fixed across all +/- parameter rollouts."
+            if exp.algo.name == "bastani_fd" else
+            "its Q-sampling pool bypasses VecNormalize, so normalizing here would silently "
+            "desync the sampled states from the rollouts evaluated at them."
+            if exp.algo.name == "zdpg" else
             "its perturbed-env pool bypasses VecNormalize, so normalizing here would silently "
             "desync the reference and perturbed rollouts."
+        )
+        warnings.warn(
+            f"experiment.normalize_obs/normalize_reward are ignored for algo='{exp.algo.name}': "
+            + reason
         )
 
     # Parse policy kwargs (activation_fn must be converted from string to class)
@@ -202,7 +279,8 @@ def main(cfg: DictConfig):
             raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(activation_map)}")
         policy_kwargs["activation_fn"] = activation_map[key]
 
-    model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}")
+    model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}",
+                        env_kwargs=env_kwargs)
 
     # eval_callback = EvalCallback(
     #     eval_env,
@@ -247,7 +325,7 @@ def main(cfg: DictConfig):
     model.save(f"{exp.dir_name}/{env_name}_{exp.algo.name.upper()}_{run.id}")
 
     if exp.render:
-        eval_env_render = gym.make(exp.env_name, render_mode="human")
+        eval_env_render = gym.make(exp.env_name, render_mode="human", **env_kwargs)
         obs, _ = eval_env_render.reset()
         for _ in range(1000):
             obs_input = env.normalize_obs(obs) if use_vecnormalize and exp.normalize_obs else obs

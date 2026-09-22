@@ -1,0 +1,7 @@
+name: bastani_fd
+
+sigma: null              # No action noise; fd_step perturbs policy parameters.
+fd_step: 0.01            # lambda
+mode: coordinate         # coordinate (Section 3) | sphere (Section 6 experiments)
+n_directions: 1          # sphere only; keep 1 in coordinate mode
+use_crn: false           # Independent +/- rollouts, as in the main estimator.

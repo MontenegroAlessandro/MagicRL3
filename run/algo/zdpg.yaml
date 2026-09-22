@@ -1,0 +1,9 @@
+name: zdpg
+
+sigma: null              # No action-noise policy; mu is the zeroth-order smoothing radius.
+mu: 0.05                 # Smoothing parameter of the two-point Q-evaluations.
+n_rollouts: 1            # N, Monte-Carlo rollout pairs per state (N = 1: no reduction).
+mode: standard           # standard (ZDPG) | symmetric (ZDPG-S, eq. 6's two-sided form)
+use_crn: true            # Paired rollouts share their post-branch environment noise.
+# NOTE: ZDPG draws both its horizons from Geom(1 - gamma), so experiment.gamma must be
+# strictly inside (0, 1); the paper's experiments use gamma = 0.8.

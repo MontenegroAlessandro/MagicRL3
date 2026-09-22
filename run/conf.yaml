@@ -19,13 +19,18 @@ wandb:
 experiment:
   # Environment
   env_name: Swimmer-v5
+  # Forwarded to gym.make for every environment the run builds -- the training and
+  # evaluation envs and the side pools FDPG/ZDPG create. Use it for parametric envs
+  # such as LQ-v0. From the command line the whole dict is replaced with "++", e.g.
+  #   '++experiment.env_kwargs={state_dim:2,action_dim:2,max_episode_steps:50}'
+  env_kwargs: {}
   n_envs: 10
   total_timesteps: 5_000_000
   dir_name: results
   render: false
-  # normalize_obs/normalize_reward only apply to REINFORCE. FDPG's perturbed-env pool
-  # bypasses VecNormalize (see run.py), so these are ignored (with a warning) when
-  # algo=fdpg -- normalizing would desync the perturbed rollouts from the reference one.
+  # Normalization applies to REINFORCE/GPOMDP. FDPG's side pool bypasses it;
+  # BastaniFD needs fixed transforms for its +/- evaluations. For both FD methods
+  # these flags are ignored with a warning (see run.py).
   normalize_obs: false
   normalize_reward: false
 
