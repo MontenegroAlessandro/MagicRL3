@@ -1,6 +1,9 @@
 defaults:
   - algo@experiment.algo: reinforce
   - _self_
+  # Optional environment preset (run/environment/*.yaml), merged over experiment: after
+  # _self_ so it overrides the defaults below, e.g. environment@experiment=lqr_toy_2x2.
+  - environment@experiment: null
 
 # Hydra >=1.2 defaults job.chdir to False, so the script no longer runs from a
 # fresh per-run output directory. Without this, every run (and every job inside
@@ -21,7 +24,7 @@ experiment:
   env_name: Swimmer-v5
   # Forwarded to gym.make for every environment the run builds -- the training and
   # evaluation envs and the side pools FDPG/ZDPG create. Use it for parametric envs
-  # such as LQ-v0. From the command line the whole dict is replaced with "++", e.g.
+  # such as LQR-v0. From the command line the whole dict is replaced with "++", e.g.
   #   '++experiment.env_kwargs={state_dim:2,action_dim:2,max_episode_steps:50}'
   env_kwargs: {}
   n_envs: 10
@@ -57,5 +60,5 @@ experiment:
     net_arch: [32,32]
     activation_fn: tanh
     log_std_init: 0.0
-    ortho_init: false
+    ortho_init: true
     learn_std: false

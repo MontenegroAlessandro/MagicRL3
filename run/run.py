@@ -221,7 +221,7 @@ def main(cfg: DictConfig):
     wandb.define_metric("eval/*", step_metric="eval/n_updates")
 
     # Extra constructor arguments for the environment (dimensions, noise, time limit,
-    # ... for parametric envs such as LQ-v0). Every env of the run uses the same ones.
+    # ... for parametric envs such as LQR-v0). Every env of the run uses the same ones.
     env_kwargs = OmegaConf.to_container(exp.env_kwargs, resolve=True) if exp.env_kwargs else {}
 
     # --- Training env ---
@@ -281,17 +281,7 @@ def main(cfg: DictConfig):
 
     model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}",
                         env_kwargs=env_kwargs)
-
-    # eval_callback = EvalCallback(
-    #     eval_env,
-    #     best_model_save_path=f"{exp.dir_name}/models/{run.id}",
-    #     log_path=f"{exp.dir_name}/logs/{run.id}",
-    #     eval_freq=exp.eval_freq,
-    #     n_eval_episodes=exp.n_eval_episodes,
-    #     deterministic=True,
-    #     render=False,
-    #     verbose=0,
-    # )
+    
     eval_callback = TrajectoryEvalCallback(
         eval_env,
         n_eval_episodes=exp.n_eval_episodes,

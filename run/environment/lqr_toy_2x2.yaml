@@ -1,0 +1,19 @@
+# Toy 2x2 LQR: deterministic -- no process noise and a fixed initial state, so every
+# rollout of a deterministic policy is identical. Stable open loop (eigenvalues 0.9,
+# 0.8) with a coupling term, full actuation (B = I), Q = R = I.
+#   optimal return: -2.6422 (H = 50, gamma = 1), -2.6391 (gamma = 0.99)
+#   optimal gain (gamma = 0.99): K* = [[-0.5341, -0.1351], [-0.0184, -0.4682]]
+env_name: LQR-v0
+env_kwargs:
+  A: [[0.9, 0.2], [0.0, 0.8]]
+  B: [[1.0, 0.0], [0.0, 1.0]]
+  Q: [[1.0, 0.0], [0.0, 1.0]]
+  R: [[1.0, 0.0], [0.0, 1.0]]
+  noise: 0.0
+  init_dist: fixed
+  init_state: [1.0, -1.0]
+  max_episode_steps: 50
+n_steps: 50
+# The optimal LQR controller is linear (a = K s): use a linear policy.
+policy_kwargs:
+  net_arch: []

@@ -16,17 +16,19 @@ helpers only: a running environment has no way of knowing which step is the
 last, so `step` never adds a terminal cost.
 
 The default system is A = 0.9 I, B = 0.9 I, Q = R = I, uniform initial state
-on [-5, 5]^d, no process noise.
+on [-5, 5]^d, no process noise. The initial state can instead be Gaussian
+(`init_dist="gaussian"`) or fixed and deterministic (`init_dist="fixed"`,
+`init_state=...`).
 
 Gain convention: K is `action_dim x state_dim` and the linear policy is
 `a = K s` (consistent with `computeOptimalK` and the rest of the repo).
 
-Interface: a plain `gymnasium.Env`, registered once as "LQ-v0", so every
+Interface: a plain `gymnasium.Env`, registered once as "LQR-v0", so every
 algorithm in this repo can use it. Choose the system when you build it::
 
-    gym.make("LQ-v0", state_dim=3, action_dim=2, noise=0.1)
-    gym.make("LQ-v0", state_dim=3, max_episode_steps=50)   # optional time limit
-    make_vec_env("LQ-v0", n_envs=8, env_kwargs=dict(state_dim=3, action_dim=2))
+    gym.make("LQR-v0", state_dim=3, action_dim=2, noise=0.1)
+    gym.make("LQR-v0", state_dim=3, max_episode_steps=50)   # optional time limit
+    make_vec_env("LQR-v0", n_envs=8, env_kwargs=dict(state_dim=3, action_dim=2))
 
 Episodes never terminate and the environment never truncates them: the horizon
 is whatever the caller imposes, either Gymnasium's `max_episode_steps` time
@@ -50,57 +52,63 @@ from gymnasium.utils import seeding
 
 
 # class
-class LQ(gym.Env):
+class LQR(gym.Env):
     """Gymnasium environment implementing an LQR problem."""
 
     metadata = {"render_modes": [], "render_fps": 30}
 
-    def __init__(self,
-                 action_dim=1,
-                 state_dim=1,
-                 noise=0,
-                 max_action=10.0,
-                 seed=None,
-                 render_mode=None,
-                 # --- optional generalisations ---
-                 A=None,
-                 B=None,
-                 Q=None,
-                 R=None,
-                 M_mix=0.0,
-                 Q_final=0.0,   # terminal cost: used by the finite-horizon helpers only
-                 init_dist="uniform",
-                 init_bound=5.0,
-                 init_mean=0.0,
-                 init_std=1.0,
-                 check_controllability=False) -> None:
+    def __init__(
+            self,
+            action_dim=1,
+            state_dim=1,
+            noise=0,
+            max_action=10.0,
+            seed=None,
+            render_mode=None,
+            # --- optional generalisations ---
+            A=None,
+            B=None,
+            Q=None,
+            R=None,
+            M_mix=0.0,
+            Q_final=0.0,   # terminal cost: used by the finite-horizon helpers only
+            init_dist="uniform",
+            init_bound=5.0,
+            init_mean=0.0,
+            init_std=1.0,
+            init_state=None,
+            check_controllability=False
+        ) -> None:
 
         super().__init__()
 
-        self.name = "LQ"
+        self.name = "LQR"
 
         # ---- system matrices --------------------------------------------------
         # "dimension mode": dimensions are given, matrices fall back to the
         # defaults (A = 0.9 I, B = 0.9 I, Q = R = I).
         # "matrix mode": A is provided, dimensions are inferred from A and B.
-        if A is None:
+        # A scalar A (or B) means that scalar times the identity of the given size.
+        if A is None or np.isscalar(A):
             self.state_dim = int(state_dim)
-            self.action_dim = int(action_dim)
-            A = 0.9 * np.eye(self.state_dim)
-            B = 0.9 * np.eye(self.state_dim, self.action_dim)
+            A = 0.9 if A is None else A
+            A = float(A) * np.eye(self.state_dim)
         else:
             A = self._as_matrix(A)
             if A.shape[0] != A.shape[1]:
                 raise ValueError("A must be a square matrix")
             self.state_dim = A.shape[0]
-            if B is None:
-                B = 0.9 * np.eye(self.state_dim, int(action_dim))
+        if B is None or np.isscalar(B):
+            self.action_dim = int(action_dim)
+            B = 0.9 if B is None else B
+            B = float(B) * np.eye(self.state_dim, self.action_dim)
+        else:
             B = self._as_matrix(B, rows=self.state_dim)
             self.action_dim = B.shape[1]
 
         ds, da = self.state_dim, self.action_dim
         if ds < 1 or da < 1:
-            raise ValueError("state_dim and action_dim must be positive")
+            raise ValueError("state_dim and action_dim must be >= 1")
         Q = np.eye(ds) if Q is None else Q
         R = np.eye(da) if R is None else R
 
@@ -140,7 +148,8 @@ class LQ(gym.Env):
         self.sigma_noise = np.diag(noise_std)
 
         # ---- initial-state distribution --------------------------------------
-        # Uniform on [-init_bound, init_bound]^ds, or Gaussian (mean, std).
+        # Uniform on [-init_bound, init_bound]^ds, Gaussian (mean, std), or a fixed,
+        # deterministic `init_state` (stored as a zero-variance mean).
         # `init_second_moment` is the E[x0 x0^T] used by the closed forms.
         self.init_dist = init_dist
         self.init_bound = None
@@ -161,18 +170,30 @@ class LQ(gym.Env):
                 raise ValueError(f"init_mean/init_std should be scalars or vectors of {ds} entries")
             self.init_second_moment = (np.outer(self.init_mean, self.init_mean)
                                        + np.diag(self.init_std ** 2))
+        elif init_dist == "fixed":
+            if init_state is None:
+                raise ValueError("init_dist='fixed' needs an init_state")
+            self.init_mean = init_state * np.ones(ds) if np.isscalar(init_state) \
+                else np.asarray(init_state, dtype=float).ravel()
+            if self.init_mean.shape != (ds,):
+                raise ValueError(f"init_state should be a scalar or a vector of {ds} entries")
+            self.init_second_moment = np.outer(self.init_mean, self.init_mean)
         else:
-            raise ValueError("init_dist must be 'uniform' or 'gaussian'")
+            raise ValueError("init_dist must be 'uniform', 'gaussian' or 'fixed'")
 
         # ---- gymnasium spaces -------------------------------------------------
-        self.action_space = spaces.Box(low=-self.max_action,
-                                       high=self.max_action,
-                                       shape=(da,),
-                                       dtype=np.float64)
-        self.observation_space = spaces.Box(low=-np.inf,
-                                            high=np.inf,
-                                            shape=(ds,),
-                                            dtype=np.float64)
+        self.action_space = spaces.Box(
+            low=-self.max_action,
+            high=self.max_action,
+            shape=(da,),
+            dtype=np.float64
+        )
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(ds,),
+            dtype=np.float64
+        )
 
         # An LQR has nothing to draw. The argument is accepted (and ignored) because
         # SB3's make_vec_env passes render_mode="rgb_array" by default, and refusing it
@@ -270,6 +291,8 @@ class LQ(gym.Env):
             self.set_state(state)
         elif self.init_dist == "uniform":
             self.state = self.np_random.uniform(low=-self.init_bound, high=self.init_bound)
+        elif self.init_dist == "fixed":
+            self.state = self.init_mean.copy()
         else:  # gaussian
             self.state = (self.init_mean
                           + self.np_random.standard_normal(self.state_dim) * self.init_std)
@@ -291,14 +314,16 @@ class LQ(gym.Env):
         return [seed]
 
     def render(self):
-        """LQ is not renderable; `render_mode` is accepted only for API compatibility."""
+        """LQR is not renderable; `render_mode` is accepted only for API compatibility."""
         return None
 
     def r_max(self, max_action=None):
         """Upper bound on the per-step cost over |s| <= max_pos, |a| <= max_action."""
         bound_a = self.max_action if max_action is None else max_action * np.ones(self.action_dim)
-        state_term = float(self.max_pos @ self.Q @ self.max_pos)
-        action_term = float(bound_a @ self.R @ bound_a)
+        # |x^T Q x| <= |x|^T |Q| |x|: with off-diagonal entries of either sign the
+        # maximum over the box is not at x = max_pos, so bound entrywise.
+        state_term = float(self.max_pos @ np.abs(self.Q) @ self.max_pos)
+        action_term = float(bound_a @ np.abs(self.R) @ bound_a)
         cross_term = 2.0 * abs(float(bound_a @ np.abs(self.M_mix) @ self.max_pos))
         return state_term + action_term + cross_term
 
@@ -313,37 +338,43 @@ class LQ(gym.Env):
 
         Solves P = S + discount (A + B K)^T P (A + B K), with
         S = Q + K^T R K + K^T M_mix + M_mix^T K the closed-loop stage-cost matrix.
+
+        The Lyapunov equation is solved exactly through its vectorised form
+        (I - discount A_cl^T (x) A_cl^T) vec(P) = vec(S). When
+        discount * rho(A_cl)^2 >= 1 the discounted cost diverges and P is +inf.
+        `max_iterations` is kept for backward compatibility and ignored.
         """
         K = self._gain(K)
         A_cl = self.A + self.B @ K
         S = self.Q + K.T @ self.R @ K + K.T @ self.M_mix + self.M_mix.T @ K
-        P = self.Q.copy()
-        for _ in range(max_iterations):
-            P_next = S + discount * (A_cl.T @ P @ A_cl)
-            if np.allclose(P_next, P):
-                return P_next
-            P = P_next
-        warnings.warn("Computation of closed-loop P did not converge")
-        return P
+        rho = np.max(np.abs(np.linalg.eigvals(A_cl)))
+        if discount * rho ** 2 >= 1.0:
+            return np.full_like(S, np.inf)
+        n = self.state_dim
+        lhs = np.eye(n * n) - discount * np.kron(A_cl.T, A_cl.T)
+        P = np.linalg.solve(lhs, S.reshape(-1)).reshape(n, n)
+        return 0.5 * (P + P.T)
 
     def _computeP2(self, K, *, discount, max_iterations=100):
         """Backward-compatible alias for the policy-evaluation Riccati."""
         return self._closed_loop_P(K, discount, max_iterations)
 
-    def discounted_P_matrix(self, discount, max_iterations=100):
+    def discounted_P_matrix(self, discount, max_iterations=10_000):
         """Optimal (control) Riccati matrix for the discounted problem."""
         P = self.Q.copy()
         for _ in range(max_iterations):
             inverse = np.linalg.inv(self.R + discount * self.B.T @ P @ self.B)
             M = self.M_mix + discount * self.B.T @ P @ self.A
             P_next = self.Q + discount * (self.A.T @ P @ self.A) - M.T @ inverse @ M
-            if np.allclose(P_next, P):
+            # Tight tolerance: with discount close to 1 the increments shrink slowly,
+            # and a loose test would stop far from the fixed point.
+            if np.allclose(P_next, P, rtol=1e-12, atol=1e-12):
                 return P_next
             P = P_next
         warnings.warn("Computation of optimal P did not converge")
         return P
 
-    def discounted_optimal_gain(self, discount, max_iterations=100):
+    def discounted_optimal_gain(self, discount, max_iterations=10_000):
         """Optimal discounted gain K* (action_dim x state_dim), a = K* s."""
         P = self.discounted_P_matrix(discount, max_iterations)
         inverse = np.linalg.inv(self.R + discount * self.B.T @ P @ self.B)
@@ -366,7 +397,7 @@ class LQ(gym.Env):
                                * (policy_std ** 2)) / (1.0 - discount)
         return state_term + action_term
 
-    def discounted_optimal_return(self, discount, policy_std=0., max_iterations=100):
+    def discounted_optimal_return(self, discount, policy_std=0., max_iterations=10_000):
         """Closed-form optimal discounted return (scalar policy std)."""
         P = self.discounted_P_matrix(discount, max_iterations)
         init_term = np.trace(P @ self.init_second_moment)
@@ -380,6 +411,8 @@ class LQ(gym.Env):
         """
         self._check_discount(discount, "computeJ")
         P = self._closed_loop_P(K, discount, max_iterations)
+        if not np.all(np.isfinite(P)):  # unstable closed loop: the cost diverges
+            return -np.inf
         if np.isscalar(Sigma):
             Sigma = float(Sigma) * np.eye(self.action_dim)
         Sigma = np.asarray(Sigma, dtype=float)
@@ -392,6 +425,8 @@ class LQ(gym.Env):
     def discounted_v(self, state, policy_param, *, discount, policy_std=0., max_iterations=100):
         """State-value V(s) of the linear policy a = K s (+ noise)."""
         P = self._closed_loop_P(policy_param, discount, max_iterations)
+        if not np.all(np.isfinite(P)):  # unstable closed loop: the cost diverges
+            return -np.inf
         state = np.ravel(state)
         return - state @ P @ state - self._noise_terms(P, discount, policy_std)
 
@@ -399,6 +434,8 @@ class LQ(gym.Env):
         """Action-value Q(s, a) of the linear policy a = K s (+ noise)."""
         self._check_discount(discount, "discounted_q")
         P = self._closed_loop_P(policy_param, discount, max_iterations)
+        if not np.all(np.isfinite(P)):  # unstable closed loop: the cost diverges
+            return -np.inf
         state, action = np.ravel(state), np.ravel(action)
         Q_11 = self.Q + discount * self.A.T @ P @ self.A
         Q_12 = self.M_mix.T + discount * self.A.T @ P @ self.B
@@ -481,11 +518,16 @@ class LQ(gym.Env):
         return - np.trace(P @ self.init_second_moment) - constant
 
     # ------------------------------------------------- legacy scalar gradients
+    def _check_scalar_identity_system(self):
+        """The closed-form gradients below hold for the scalar system A = B = 1, M_mix = 0."""
+        if (self.state_dim != 1 or self.action_dim != 1
+                or self.A[0, 0] != 1.0 or self.B[0, 0] != 1.0 or self.M_mix[0, 0] != 0.0):
+            raise NotImplementedError("closed-form gradients need a scalar system "
+                                      "with A = B = 1 and M_mix = 0")
+
     def grad_K(self, K, Sigma, *, discount):
         """Policy gradient wrt K (scalar A = B = I case only)."""
-        I = np.eye(self.state_dim)
-        if not np.array_equal(self.A, I) or not np.array_equal(self.B, I):
-            raise NotImplementedError
+        self._check_scalar_identity_system()
         if not isinstance(K, Number) or not isinstance(Sigma, Number):
             raise NotImplementedError
         self._check_discount(discount, "grad_K")
@@ -494,14 +536,14 @@ class LQ(gym.Env):
         den = 1 - discount * (1 + 2 * theta + theta ** 2)
         dePdeK = 2 * (theta * r / den
                       + discount * (q + theta ** 2 * r) * (1 + theta) / den ** 2)
-        # second moment of the initial state, consistent with `init_second_moment`
+        # J = -P E[x0^2] - (sigma (r + discount P) + discount w P) / (1 - discount),
+        # with w the process-noise variance and E[x0^2] from `init_second_moment`
+        w = float(self.noise_std[0] ** 2)
         return float(- dePdeK * (self.init_second_moment[0, 0]
-                                 + discount * sigma / (1 - discount)))
+                                 + discount * (sigma + w) / (1 - discount)))
 
     def grad_Sigma(self, K, Sigma=None, *, discount):
-        I = np.eye(self.state_dim)
-        if not np.array_equal(self.A, I) or not np.array_equal(self.B, I):
-            raise NotImplementedError
+        self._check_scalar_identity_system()
         if not isinstance(K, Number):
             raise NotImplementedError
         self._check_discount(discount, "grad_Sigma")
@@ -509,9 +551,7 @@ class LQ(gym.Env):
         return float(-(self.R[0, 0] + discount * P[0, 0]) / (1 - discount))
 
     def grad_mixed(self, K, Sigma=None, *, discount):
-        I = np.eye(self.state_dim)
-        if not np.array_equal(self.A, I) or not np.array_equal(self.B, I):
-            raise NotImplementedError
+        self._check_scalar_identity_system()
         if not isinstance(K, Number):
             raise NotImplementedError
         self._check_discount(discount, "grad_mixed")
@@ -523,7 +563,12 @@ class LQ(gym.Env):
         return float(-dePdeK * discount / (1 - discount))
 
     def computeQFunction(self, x, u, K, Sigma, *, discount, n_random_xn=100):
-        """Monte-Carlo Q-value of (x, u) under a = K x + N(0, Sigma)."""
+        """Monte-Carlo Q-value of (x, u) under a = K x + N(0, Sigma).
+
+        The first action u is given (no policy noise at t = 0); the next state is
+        sampled and valued with the closed-form V of the policy, so the estimate
+        is unbiased for `discounted_q`.
+        """
         x = np.ravel(np.asarray(x, dtype=float))
         u = np.ravel(np.asarray(u, dtype=float))
         if np.isscalar(Sigma):
@@ -532,44 +577,14 @@ class LQ(gym.Env):
 
         self._check_discount(discount, "computeQFunction")
         P = self._computeP2(K, discount=discount)
-        Qfun = 0.0
-        for _ in range(n_random_xn):
-            noise = self.sigma_noise @ self.np_random.standard_normal(self.state_dim)
-            action_noise = self.np_random.multivariate_normal(
-                np.zeros(Sigma.shape[0]), Sigma)
-            nextstate = self.A @ x + self.B @ (u + action_noise) + noise
-            Qfun -= (x @ self.Q @ x + u @ self.R @ u
-                     + discount * nextstate @ P @ nextstate
-                     + (discount / (1 - discount))
-                     * np.trace(Sigma @ (self.R + discount * self.B.T @ P @ self.B)))
-        return Qfun / n_random_xn
-
-
-if __name__ == '__main__':
-    """Sanity check: closed forms against Monte-Carlo rollouts of K*.
-
-    The discount and the horizon are the caller's, not the environment's.
-    """
-    GAMMA, HORIZON = 0.98, 50
-    env = LQ(state_dim=3, action_dim=2, noise=0.1, seed=0)
-    K_star = env.computeOptimalK(GAMMA)
-    print('K^* =\n', K_star)
-    print('J^* (infinite horizon)  =', env.discounted_optimal_return(GAMMA, policy_std=0))
-    print('J(K^*) via computeJ     =', env.computeJ(K_star, discount=GAMMA, Sigma=0))
-    print(f'J(K^*) over H = {HORIZON}  =', env.finite_horizon_return(K_star, HORIZON, GAMMA))
-
-    n_episodes = 20000
-    returns = np.empty(n_episodes)
-    for i in range(n_episodes):
-        state, _ = env.reset(seed=i)
-        episode_return, gamma_t = 0.0, 1.0
-        for _ in range(HORIZON):
-            state, reward, terminated, truncated, _ = env.step(K_star @ state)
-            episode_return += gamma_t * reward
-            gamma_t *= GAMMA
-            if terminated or truncated:
-                break
-        returns[i] = episode_return
-    mean, err = returns.mean(), 1.96 * returns.std() / np.sqrt(n_episodes)
-    print(f"Monte-Carlo return ({HORIZON} steps, N={n_episodes}): "
-          f"{mean:.4f} +/- {err:.4f}")
+        if not np.all(np.isfinite(P)):
+            return -np.inf
+        W = np.diag(self.noise_std ** 2)
+        # constant part of V: -(tr(Sigma (R + discount B^T P B)) + discount tr(W P)) / (1 - discount)
+        v_constant = (np.trace(Sigma @ (self.R + discount * self.B.T @ P @ self.B))
+                      + discount * np.trace(W @ P)) / (1.0 - discount)
+        noise = self.np_random.standard_normal((n_random_xn, self.state_dim)) @ self.sigma_noise.T
+        nextstates = self.A @ x + self.B @ u + noise
+        next_values = - np.einsum("ni,ij,nj->n", nextstates, P, nextstates) - v_constant
+        cost = x @ self.Q @ x + u @ self.R @ u + 2.0 * (u @ self.M_mix @ x)
+        return float(- cost + discount * next_values.mean())
