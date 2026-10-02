@@ -149,6 +149,11 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         """Policy used for collection; callbacks still access the nominal self.policy."""
         return self.policy
 
+    def _rollout_step_caps(self) -> Optional[np.ndarray]:
+        """Hook: optional per-env cap on the trajectory length (env i stops collecting
+        after caps[i] steps). Default: no per-env cap, only n_rollout_steps."""
+        return None
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -188,6 +193,9 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
 
         # active[i] = True while env i is still collecting its trajectory
         active = np.ones(env.num_envs, dtype=bool)
+        step_caps = self._rollout_step_caps()
+        if step_caps is not None:
+            active &= step_caps > 0
         n_steps = 0
 
         while active.any() and n_steps < n_rollout_steps:
@@ -235,6 +243,8 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
 
             # Deactivate envs whose trajectory just ended
             active &= ~dones
+            if step_caps is not None:
+                active &= n_steps < step_caps
 
             self._last_obs = new_obs  # type: ignore[assignment]
             self._last_episode_starts = dones

@@ -1,9 +1,11 @@
 name: zdpg
 
-sigma: null              # No action-noise policy; mu is the zeroth-order smoothing radius.
-mu: 0.05                 # Smoothing parameter of the two-point Q-evaluations.
-n_rollouts: 1            # N, Monte-Carlo rollout pairs per state (N = 1: no reduction).
+sigma: 0.05              # Action-perturbation radius (mu in the paper); no action noise otherwise.
 mode: standard           # standard (ZDPG) | symmetric (ZDPG-S, eq. 6's two-sided form)
-use_crn: true            # Paired rollouts share their post-branch environment noise.
-# NOTE: ZDPG draws both its horizons from Geom(1 - gamma), so experiment.gamma must be
-# strictly inside (0, 1); the paper's experiments use gamma = 0.8.
+sampling_mode: normal    # normal | sphere, over the d_A action dimensions
+horizon_mode: auto       # auto | finite | geometric
+# auto -> finite (H = min(env time limit, n_steps), t ~ Unif{0..H-1}; gamma = 1 allowed)
+#   when gamma = 1 or the env has a time limit, else geometric (the paper's infinite-horizon
+#   discounted setting, needs gamma < 1; n_steps is then only a safety cap).
+# batch_size (number of samples per update) is not set here on purpose -- like FDPG it
+# equals experiment.n_envs, so run.py derives it.

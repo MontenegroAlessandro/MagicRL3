@@ -48,15 +48,14 @@ def build_run_name(exp) -> str:
         )
     elif algo.name == "bastani_fd":
         return (
-            f"BastaniFD-{algo.mode} Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} λ={algo.fd_step} "
-            f"Nd={algo.n_directions} crn={algo.use_crn}"
+            f"BastaniFD-{algo.sampling_mode} Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} crn={algo.use_crn}"
         )
     elif algo.name == "zdpg":
         return (
             f"{'ZDPG-S' if algo.mode == 'symmetric' else 'ZDPG'} Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} µ={algo.mu} "
-            f"N={algo.n_rollouts} crn={algo.use_crn}"
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} "
+            f"{algo.sampling_mode}/{algo.horizon_mode}"
         )
     else:
         raise ValueError(f"Unknown experiment.algo.name '{algo.name}'. Choose from: {ALGOS}")
@@ -92,9 +91,10 @@ def build_model(exp, env, policy_kwargs, tensorboard_log, env_kwargs=None):
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
             gamma=exp.gamma,
-            fd_step=algo.fd_step,
-            mode=algo.mode,
-            n_directions=algo.n_directions,
+            sigma=algo.sigma,
+            # One parameter-space direction per sub-env, like FDPG's batch_size.
+            batch_size=exp.n_envs,
+            sampling_mode=algo.sampling_mode,
             use_crn=algo.use_crn,
             max_grad_norm=exp.max_grad_norm,
             use_sde=exp.use_sde,
@@ -113,10 +113,12 @@ def build_model(exp, env, policy_kwargs, tensorboard_log, env_kwargs=None):
             learning_rate=exp.learning_rate,
             n_steps=exp.n_steps,
             gamma=exp.gamma,
-            mu=algo.mu,
-            n_rollouts=algo.n_rollouts,
+            sigma=algo.sigma,
+            # One (branch time, perturbation) sample per sub-env, like FDPG's batch_size.
+            batch_size=exp.n_envs,
             mode=algo.mode,
-            use_crn=algo.use_crn,
+            sampling_mode=algo.sampling_mode,
+            horizon_mode=algo.horizon_mode,
             # ZDPG restarts the system at the sampled states to evaluate the Q-function,
             # which needs its own pool of environments built from the same id and kwargs.
             env_id=exp.env_name,
@@ -304,6 +306,10 @@ def main(cfg: DictConfig):
         callbacks = CallbackList([eval_callback, wandb_callback, progress_bar_callback])
     else:
         callbacks = CallbackList([wandb_callback, progress_bar_callback])
+
+    if exp.algo.name == "zdpg":
+        # horizon_mode="auto" is resolved from gamma and the env's time limit.
+        wandb.config.update({"resolved_horizon_mode": model.resolved_horizon_mode})
 
     model.learn(
         total_timesteps=int(exp.total_timesteps),

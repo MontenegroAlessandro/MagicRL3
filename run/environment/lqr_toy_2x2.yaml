@@ -13,6 +13,7 @@ env_kwargs:
   init_dist: fixed
   init_state: [1.0, -1.0]
   max_episode_steps: 50
+  init_bound: 1.0
 n_steps: 50
 # The optimal LQR controller is linear (a = K s): use a linear policy.
 policy_kwargs:

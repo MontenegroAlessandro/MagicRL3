@@ -1,16 +1,16 @@
-"""Parameter-space finite differences from Bastani (AISTATS 2020), Sections 3 and 6.
+"""Parameter-space finite differences from Bastani (AISTATS 2020), Section 6.
 
 Sample Complexity of Estimating the Policy Gradient for Nearly Deterministic
 Dynamical Systems: https://proceedings.mlr.press/v108/bastani20a.html
 """
 
-from copy import deepcopy
 from typing import Any, ClassVar, Optional, TypeVar, Union
 
 import numpy as np
 import torch as th
 from gymnasium import spaces
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from torch.func import functional_call, vmap
+from torch.nn.utils import parameters_to_vector
 
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.policies import BasePolicy
@@ -23,39 +23,102 @@ from policies import ActorOnlyPolicy
 
 SelfBastaniFD = TypeVar("SelfBastaniFD", bound="BastaniFD")
 
+SAMPLING_MODES = ("normal", "sphere")
+"""
+Distribution of the parameter-space direction nu (d_Theta = number of searched policy parameters).
+1.  normal: nu ~ N(0_{d_Theta}, I_{d_Theta}), q(nu) = nu.
+2.  sphere: nu ~ Unif(S^{d_Theta-1}), q(nu) = d_Theta * nu.
+"""
+
+
+class _MeanActor(th.nn.Module):
+    """Deterministic action path of ActorOnlyPolicy.forward(deterministic=True), without
+    the distribution object (whose argument validation is not vmap-compatible)."""
+
+    def __init__(self, policy: ActorOnlyPolicy):
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, obs: th.Tensor) -> th.Tensor:
+        features = self.policy.extract_features(obs, self.policy.features_extractor)
+        return self.policy.action_net(self.policy.mlp_extractor.forward_actor(features))
+
+
+class _PerEnvParameterPolicy:
+    """
+    Rollout-time view of the nominal policy in which sub-env i acts deterministically
+    with its own parameter vector theta_i, i.e. a_t^i = mu_{theta_i}(s_t^i). The nominal
+    parameters are never written to: theta_i is only bound for the forward pass through
+    `functional_call`, and all sub-envs are evaluated in ONE batched pass via `vmap`.
+    Exposes the subset of the policy interface used by the base trajectory collector.
+    """
+
+    def __init__(self, policy: ActorOnlyPolicy, names: list[str]):
+        self.policy = policy
+        self.mean_actor = _MeanActor(policy)
+        self.names = names
+        self.shapes = [p.shape for name, p in policy.named_parameters() if name in names]
+        self._batched_params: Optional[dict[str, th.Tensor]] = None
+
+    @property
+    def squash_output(self) -> bool:
+        return self.policy.squash_output
+
+    def unscale_action(self, action: np.ndarray) -> np.ndarray:
+        return self.policy.unscale_action(action)
+
+    def set_training_mode(self, mode: bool) -> None:
+        self.policy.set_training_mode(mode)
+
+    def set_parameters(self, thetas: th.Tensor) -> None:
+        """:param thetas: (n_envs, d_Theta), row i is sub-env i's flattened parameter vector."""
+        params, offset = {}, 0
+        for name, shape in zip(self.names, self.shapes):
+            size = int(np.prod(shape))
+            params["policy." + name] = thetas[:, offset:offset + size].reshape(thetas.shape[0], *shape)
+            offset += size
+        self._batched_params = params
+
+    def __call__(self, obs: th.Tensor, deterministic: bool = True) -> tuple[th.Tensor, None]:
+        assert deterministic, "BastaniFD rollouts are deterministic"
+        assert self._batched_params is not None, "call set_parameters() before rolling out"
+
+        def single(params: dict[str, th.Tensor], single_obs: th.Tensor) -> th.Tensor:
+            # Parameters not in `params` (log_std, a frozen bias) keep their nominal values.
+            return functional_call(self.mean_actor, params, (single_obs.unsqueeze(0),), strict=False).squeeze(0)
+
+        actions = vmap(single)(self._batched_params, obs)
+        return actions.reshape((-1, *self.policy.action_space.shape)), None
+
 
 class BastaniFD(TrajectoryOnPolicyAlgorithm):
-    """Two-sided finite differences of the deterministic policy's total return.
+    """Two-sided parameter-space finite differences of the deterministic policy's return.
 
-    For each direction v, collect n_envs trajectories at theta + fd_step * v
-    and another n_envs at theta - fd_step * v. Their mean returns give
-    g_v = (mean(J_plus) - mean(J_minus)) / (2 * fd_step) * v.
+    One update draws batch_size = n_envs directions nu_1, ..., nu_N over the flattened
+    policy parameters (see SAMPLING_MODES) and collects two width-N rollouts of the
+    deterministic policy: sub-env i plays theta + sigma * nu_i in the first and
+    theta - sigma * nu_i in the second, giving the returns J+_i and J-_i. Then
 
-    ``coordinate`` sums g_v over all parameter basis vectors (Section 3).
-    ``sphere`` uses random unit vectors, as in Section 6, with the gradient
-    normalization d_theta / n_directions. Since E[v v^T] = I / d_theta,
-    merely averaging g_v would estimate a gradient scaled by 1 / d_theta.
-    For finite fd_step this estimates the gradient of J smoothed over the
-    parameter-space ball of that radius, rather than the exact gradient of J.
+        g = 1/N sum_i (J+_i - J-_i) / (2 * sigma) * q(nu_i).
 
-    Uses the existing actor, trajectory collector/buffer, learning loop,
-    callbacks, clipping, and optimizer API. SGD is the default, as in the
-    experiments; policy_kwargs may explicitly select another optimizer.
+    Each direction costs exactly two trajectories (2N per update, the same count as
+    Trajectory-FDPG with batch_size=N). No action noise is injected anywhere and no
+    grad_theta mu_theta is used: this is a black-box estimator. For finite sigma it is
+    unbiased for the gradient of J smoothed over the Gaussian / ball of radius sigma.
 
-    :param fd_step: Positive parameter perturbation radius (lambda in the paper).
-    :param mode: "coordinate" (Section 3) or "sphere" (Section 6).
-    :param n_directions: Directions averaged in sphere mode; coordinate mode
-        always evaluates every parameter and requires n_directions=1.
-    :param use_crn: Replay reset seeds for each +/- pair (simulator variance
-        reduction mentioned in Section 3). Requires envs that honor reset seeds
-        for all their randomness. Default False uses independent samples.
-    :param gamma: Defaults to 1, the paper's undiscounted finite-horizon return.
-        Values below 1 extend the estimator to the repo's discounted objective.
+    Returns, horizon capping, episode termination, action clipping, env reseeding and
+    timestep accounting all go through the shared trajectory collector, exactly as for
+    FDPG's reference rollouts.
 
-    All other arguments follow TrajectoryOnPolicyAlgorithm. Actions are always
-    deterministic, and log_std is frozen/excluded from the parameter search.
-    One update costs at most 2 * n_envs * n_steps * number_of_directions
-    transitions; a complete update may overshoot learn()'s timestep budget.
+    :param sigma: Positive parameter-perturbation radius (lambda in the paper).
+    :param batch_size: N, the number of directions per update; must equal env.num_envs.
+    :param sampling_mode: "normal" or "sphere", see SAMPLING_MODES.
+    :param use_crn: If True, the + and - rollouts replay the same reset seeds (common
+        random numbers). If False (default), the - rollout gets an independent seed.
+
+    The returns J+ / J- belong to the perturbed policies; the nominal theta is never
+    rolled out during training, so train/mean_return = mean (J+ + J-) / 2 and
+    rollout/* stats come from perturbed policies. Use eval/* to compare methods.
     """
 
     policy_aliases: ClassVar[dict[str, type[BasePolicy]]] = {
@@ -68,12 +131,12 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 1e-3,
         n_steps: int = 1000,
-        gamma: float = 1.0,
-        fd_step: float = 0.01,
-        mode: str = "coordinate",
-        n_directions: int = 1,
+        gamma: float = 0.99,
+        sigma: float = 0.1,
+        batch_size: int = 1,
+        sampling_mode: str = "normal",
         use_crn: bool = False,
-        max_grad_norm: Optional[float] = None,
+        max_grad_norm: Optional[float] = 0.5,
         use_sde: bool = False,
         sde_sample_freq: int = -1,
         rollout_buffer_class: Optional[type[TrajectoryBuffer]] = None,
@@ -86,14 +149,12 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
     ):
-        if not np.isfinite(fd_step) or fd_step <= 0:
-            raise ValueError("fd_step must be finite and strictly positive")
-        if mode not in ("coordinate", "sphere"):
-            raise ValueError("mode must be 'coordinate' or 'sphere'")
-        if not isinstance(n_directions, int) or isinstance(n_directions, bool) or n_directions < 1:
-            raise ValueError("n_directions must be a positive integer")
-        if mode == "coordinate" and n_directions != 1:
-            raise ValueError("n_directions only applies to sphere mode; use 1 for coordinate mode")
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            raise ValueError("sigma must be finite and strictly positive")
+        if sampling_mode not in SAMPLING_MODES:
+            raise ValueError(f"sampling_mode must be one of {SAMPLING_MODES}, but got {sampling_mode}")
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
         if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
             raise ValueError("n_steps must be a positive integer")
         if not np.isfinite(gamma) or not 0 <= gamma <= 1:
@@ -103,7 +164,6 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
 
         policy_kwargs = dict(policy_kwargs or {})
         policy_kwargs["learn_std"] = False
-        policy_kwargs.setdefault("optimizer_class", th.optim.SGD)
         super().__init__(
             policy,
             env,
@@ -125,35 +185,52 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
             _init_setup_model=False,
             supported_action_spaces=(spaces.Box,),
         )
-        self.fd_step = float(fd_step)
-        self.mode = mode
-        self.n_directions = n_directions
+        self.sigma = float(sigma)
+        self.batch_size = batch_size
+        self.sampling_mode = sampling_mode
         self.use_crn = use_crn
         self._n_updates = 0
 
         if _init_setup_model:
             self._setup_model()
 
+        # set up the method's name for logging purposes
+        self.name = "BastaniFD-" + sampling_mode
+
     def _setup_model(self) -> None:
         super()._setup_model()
-        # Keep the nominal policy available to predict/evaluation/checkpoint
-        # callbacks even while collecting a perturbed policy's trajectories.
-        self._perturbed_policy = deepcopy(self.policy)
-        if not self._search_parameters(self.policy):
+
+        if self.n_envs != self.batch_size:
+            raise ValueError(
+                f"env.num_envs must equal batch_size: got {self.n_envs} envs but "
+                f"batch_size={self.batch_size}. Build the training env with n_envs=batch_size "
+                f"(one sub-env per direction)."
+            )
+        names = self._search_parameter_names(self.policy)
+        if not names:
             raise ValueError("BastaniFD requires trainable deterministic actor parameters")
+        self._rollout_policy = _PerEnvParameterPolicy(self.policy, names)
         self._gradient_estimate = None
         self._rollout_seed = None
-        # Preserve these streams on save/load; independent of callback/global RNGs.
-        if not hasattr(self, "_episode_seed_rng"):
-            episode_seed, direction_seed = np.random.SeedSequence(self.seed).spawn(2)
-            self._episode_seed_rng = np.random.default_rng(episode_seed)
-            self._direction_rng = np.random.default_rng(direction_seed)
+
+        # Same dedicated RNG streams as FDPG (env reseeding, perturbation sampling),
+        # seeded once from self.seed and independent of the global numpy/torch streams.
+        self._episode_seed_rng = np.random.default_rng(self.seed)
+        self._perturbation_rng = None
+        if self.seed is not None:
+            self._perturbation_rng = th.Generator(device=self.device)
+            self._perturbation_rng.manual_seed(self.seed)
+
         if self.env is not None:
             self._check_normalization(self.env)
 
     @staticmethod
-    def _search_parameters(policy: ActorOnlyPolicy) -> list[th.nn.Parameter]:
-        return [p for name, p in policy.named_parameters() if p.requires_grad and name != "log_std"]
+    def _search_parameter_names(policy: ActorOnlyPolicy) -> list[str]:
+        return [name for name, p in policy.named_parameters() if p.requires_grad and name != "log_std"]
+
+    def _search_parameters(self, policy: ActorOnlyPolicy) -> list[th.nn.Parameter]:
+        names = set(self._search_parameter_names(policy))
+        return [p for name, p in policy.named_parameters() if name in names]
 
     @staticmethod
     def _check_normalization(env: VecEnv) -> None:
@@ -164,28 +241,29 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
                 "Disable VecNormalize or freeze its statistics with training=False."
             )
 
-    def _get_rollout_policy(self) -> ActorOnlyPolicy:
-        return self._perturbed_policy
+    def _get_rollout_policy(self) -> _PerEnvParameterPolicy:
+        return self._rollout_policy
 
     def _reset_env(self, env: VecEnv) -> np.ndarray:
-        env.seed(self._rollout_seed)
+        self._episode_seeds = np.array(env.seed(self._rollout_seed))  # records one seed per env
         return env.reset()
 
-    def _directions(self, theta: th.Tensor):
-        if self.mode == "coordinate":
-            # Stream basis vectors; never allocate a d_theta by d_theta matrix.
-            for k in range(theta.numel()):
-                direction = th.zeros_like(theta)
-                direction[k] = 1
-                yield direction
+    def _sample_directions(self, n_directions: int, dim: int) -> tuple[th.Tensor, th.Tensor]:
+        """Draw nu (n_directions, dim) and q(nu), with FDPG's sampling conventions."""
+        nu = th.randn(n_directions, dim, device=self.device, generator=self._perturbation_rng)
+        if self.sampling_mode == "normal":
+            q_nu = nu
+        elif self.sampling_mode == "sphere":
+            nu = nu / nu.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            q_nu = dim * nu
         else:
-            for _ in range(self.n_directions):
-                direction = th.as_tensor(
-                    self._direction_rng.standard_normal(theta.numel()),
-                    dtype=theta.dtype,
-                    device=theta.device,
-                )
-                yield direction / direction.norm()
+            raise ValueError(f"sampling_mode must be one of {SAMPLING_MODES}, but got {self.sampling_mode}")
+        return nu, q_nu
+
+    def _estimate_gradient(self, j_plus: th.Tensor, j_minus: th.Tensor, q_nu: th.Tensor) -> th.Tensor:
+        """g = 1/N sum_i (J+_i - J-_i) / (2 sigma) * q(nu_i)."""
+        differences = (j_plus - j_minus).to(q_nu.dtype) / (2 * self.sigma)
+        return (differences[:, None] * q_nu).mean(dim=0)
 
     def collect_rollouts(
         self,
@@ -196,48 +274,39 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
     ) -> bool:
         self._check_normalization(env)
         self._gradient_estimate = None
-        self._perturbed_policy.load_state_dict(self.policy.state_dict())
-        parameters = self._search_parameters(self._perturbed_policy)
-        theta = parameters_to_vector(self._search_parameters(self.policy)).detach().clone()
-        gradient = th.zeros_like(theta)
-        plus_returns, minus_returns = [], []
+        with th.no_grad():
+            theta = parameters_to_vector(self._search_parameters(self.policy)).detach().clone()
+            nu, q_nu = self._sample_directions(env.num_envs, theta.numel())
 
+        returns = []
         try:
-            for direction in self._directions(theta):
-                pair_seed = int(self._episode_seed_rng.integers(0, 2**31 - env.num_envs))
-                returns = []
-                for sign in (1, -1):
-                    self._rollout_seed = pair_seed
-                    if sign == -1 and not self.use_crn:
-                        self._rollout_seed = int(self._episode_seed_rng.integers(0, 2**31 - env.num_envs))
-                    with th.no_grad():
-                        vector_to_parameters(theta + sign * self.fd_step * direction, parameters)
-                    # Reuse the collector, including action clipping, episode caps,
-                    # termination masks, timestep accounting and all callbacks.
-                    if not super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps):
-                        return False
-                    returns.append(float(np.mean([
-                        rollout_buffer._returns[i][0] for i in range(env.num_envs)
-                    ], dtype=np.float64)))
-                plus_returns.append(returns[0])
-                minus_returns.append(returns[1])
-                gradient.add_(direction, alpha=(returns[0] - returns[1]) / (2 * self.fd_step))
+            for sign in (1, -1):
+                # Same draw pattern as FDPG: one seed for the first rollout, and one more
+                # for the second only without CRN (with CRN it replays the same seeds).
+                if sign == 1 or not self.use_crn:
+                    self._rollout_seed = int(self._episode_seed_rng.integers(0, 2**31 - 1))
+                with th.no_grad():
+                    self._rollout_policy.set_parameters(theta + sign * self.sigma * nu)
+                # Reuse the collector, including action clipping, episode caps,
+                # termination masks, timestep accounting and all callbacks.
+                if not super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps):
+                    return False
+                returns.append(th.as_tensor(
+                    np.array([rollout_buffer._returns[i][0] for i in range(env.num_envs)], dtype=np.float64),
+                    device=self.device,
+                ))
         finally:
-            # Also restore the working copy on early stop or environment errors.
-            self._perturbed_policy.load_state_dict(self.policy.state_dict())
+            self._rollout_policy._batched_params = None
             self._rollout_seed = None
 
-        if self.mode == "sphere":
-            # E[v v^T] = I / d_theta for a uniform unit vector. Restore the
-            # gradient scale after averaging the sampled directional derivatives.
-            gradient.mul_(theta.numel() / self.n_directions)
+        j_plus, j_minus = returns
+        gradient = self._estimate_gradient(j_plus, j_minus, q_nu)
         if not th.isfinite(gradient).all():
-            raise ValueError("Non-finite BastaniFD gradient; check rewards and fd_step")
+            raise ValueError("Non-finite BastaniFD gradient; check rewards and sigma")
         self._gradient_estimate = gradient
-        self._mean_return_plus = float(np.mean(plus_returns))
-        self._mean_return_minus = float(np.mean(minus_returns))
-        self._directions_evaluated = len(plus_returns)
-        differences = np.asarray(plus_returns) - np.asarray(minus_returns)
+        self._mean_return_plus = float(j_plus.mean())
+        self._mean_return_minus = float(j_minus.mean())
+        differences = (j_plus - j_minus).cpu().numpy()
         self._mean_abs_return_difference = float(np.abs(differences).mean())
         self._zero_difference_fraction = float(np.mean(differences == 0))
         return True
@@ -248,7 +317,7 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
         parameters = self._search_parameters(self.policy)
-        self.policy.optimizer.zero_grad(set_to_none=True)
+        self.policy.optimizer.zero_grad()
         offset = 0
         for parameter in parameters:
             size = parameter.numel()
@@ -256,24 +325,26 @@ class BastaniFD(TrajectoryOnPolicyAlgorithm):
             parameter.grad = -self._gradient_estimate[offset:offset + size].reshape_as(parameter).clone()
             offset += size
         if self.max_grad_norm is not None:
-            th.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
         self.policy.optimizer.step()
 
         self._n_updates += 1
         self.logger.record("train/n_updates", self._n_updates)
+        self.logger.record("train/n_valid_trajectories", self.batch_size)
+        self.logger.record("train/mean_return", (self._mean_return_plus + self._mean_return_minus) / 2)
         self.logger.record("train/gradient_norm", self._gradient_estimate.norm().item())
         self.logger.record("train/mean_return_plus", self._mean_return_plus)
         self.logger.record("train/mean_return_minus", self._mean_return_minus)
-        self.logger.record("train/mean_return", (self._mean_return_plus + self._mean_return_minus) / 2)
         self.logger.record("train/mean_abs_return_difference", self._mean_abs_return_difference)
         self.logger.record("train/zero_difference_fraction", self._zero_difference_fraction)
-        self.logger.record("train/fd_step", self.fd_step)
-        self.logger.record("train/n_directions", self._directions_evaluated)
+        self.logger.record("train/sigma", self.sigma)
         self.logger.record("train/n_parameters", offset)
+        if hasattr(self.policy, "log_std"):
+            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
         self._gradient_estimate = None
 
     def _excluded_save_params(self) -> list[str]:
-        return super()._excluded_save_params() + ["_perturbed_policy", "_gradient_estimate", "_rollout_seed"]
+        return super()._excluded_save_params() + ["_rollout_policy", "_gradient_estimate", "_rollout_seed"]
 
     def learn(
         self: SelfBastaniFD,

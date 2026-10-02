@@ -2,7 +2,7 @@
 
 Zeroth-order Deterministic Policy Gradient: https://arxiv.org/abs/2006.07314
 Algorithm 1 (ZDPG), Algorithm 2 (Q-function sampler) and Algorithm 3 (discounted
-state sampler) of that paper.
+state sampler) of that paper, plus a finite-horizon variant (also valid for gamma = 1).
 """
 
 import warnings
@@ -29,68 +29,79 @@ SelfZDPG = TypeVar("SelfZDPG", bound="ZDPG")
 MODES = ("standard", "symmetric")
 """
 The two two-point gradient representations of Lemma 1 (eq. 6).
-1.  standard: ZDPG, [Q(s, a + mu * u) - Q(s, a)] / mu.
-2.  symmetric: ZDPG-S, [Q(s, a + mu * u) - Q(s, a - mu * u)] / (2 * mu).
+1.  standard: ZDPG, [Q(s, a + sigma * u) - Q(s, a)] / sigma.
+2.  symmetric: ZDPG-S, [Q(s, a + sigma * u) - Q(s, a - sigma * u)] / (2 * sigma).
+"""
+
+SAMPLING_MODES = ("normal", "sphere")
+"""
+Distribution of the action perturbation u (same as FDPG).
+1.  normal: u ~ N(0_{d_A}, I_{d_A}), q(u) = u.
+2.  sphere: u ~ Unif(S^{d_A-1}), q(u) = d_A * u.
+"""
+
+HORIZON_MODES = ("auto", "finite", "geometric")
+"""
+Which objective the estimator targets.
+1.  finite: J = E[sum_{t<H} gamma^t r_t] with H = min(env time limit, n_steps), the
+    objective of FDPG/REINFORCE; gamma = 1 allowed. Branch time t ~ Unif{0..H-1},
+    Q = discounted return-to-go from t to H (or termination), weight H * gamma^t.
+2.  geometric: the paper's infinite-horizon discounted objective (gamma < 1). Branch
+    time T_s ~ Geom(1 - gamma), Q = undiscounted sum of T_Q + 1 rewards with an
+    independent T_Q ~ Geom(1 - gamma), weight 1 / (1 - gamma). n_steps and the env time
+    limit only act as a safety cap: draws reaching it are truncated (biased), warned
+    about once and logged as train/truncated_fraction.
+3.  auto: finite if gamma = 1 or the env has a time limit, geometric otherwise.
 """
 
 STATE_MATCH_ATOL = 1e-5
 """
-Tolerance used when checking that a Q-pool sub-env replayed its reference's state
-sampler trajectory exactly. Replaying the same reset seed with the same deterministic
-policy has to reproduce the very same states, so any real mismatch is an environment
-whose randomness is not determined by its reset seed, not a numerical artifact.
+Tolerance used when checking that a branch sub-env replayed its reference's trajectory
+exactly. Replaying the same reset seed with the same deterministic policy has to
+reproduce the very same states, so any real mismatch is an environment whose randomness
+is not determined by its reset seed, not a numerical artifact.
 """
 
 
 class ZDPG(TrajectoryOnPolicyAlgorithm):
     """
-    Zeroth-order Deterministic Policy Gradient (Kumar et al., 2020), Algorithm 1.
+    Zeroth-order Deterministic Policy Gradient (Kumar et al., 2020).
 
-    One iteration draws a random horizon T_Q ~ Geom(1 - gamma), a state
-    s_t ~ (1 - gamma) rho^{pi_theta} (Algorithm 3) and an action-space perturbation
-    u ~ N(0, I_p), estimates the Q-function at the perturbed and at the nominal
-    initial action with N random-horizon rollout pairs (Algorithm 2), and ascends
+    One update draws M = batch_size = n_envs independent samples. Sample i follows the
+    deterministic policy mu_theta from s_0 in the training env (the reference rollout),
+    picks a branch time t_i (see HORIZON_MODES) and an action perturbation u_i (see
+    SAMPLING_MODES), and estimates the Q-function at s_{t_i} with the perturbed first
+    action mu_theta(s_{t_i}) + sigma u_i against the nominal one (standard) or against
+    mu_theta(s_{t_i}) - sigma u_i (symmetric), following mu_theta afterwards. Then
 
-        g_t = 1 / (1 - gamma) * grad_theta pi_theta(s_t) * (Q+ - Q-) / mu * u.
+        g = 1/M sum_i w(t_i) grad_theta mu_theta(s_{t_i})^T (Q+_i - Q-_i) / (sigma or 2 sigma) q(u_i),
 
-    The perturbation lives in the p-dimensional action space, never in the
-    d-dimensional parameter space, and no critic is involved: the Q-values come
-    straight from truncated rollouts of the deterministic policy.
+    computed as a single vector-Jacobian product. The perturbation lives in action space
+    only, and no critic is involved: the Q-values come straight from rollouts.
 
-    Batching: the repo's n_envs parallel environments provide n_envs independent
-    (s_t, u) draws per iteration, whose quasi-gradients are averaged (the mini-batch
-    setting of Theorem 2). T_Q is drawn once per iteration and shared across the
-    batch, exactly as Algorithm 1 uses a single T_Q for both samplers.
+    Branching: a side pool of M (standard) or 2M (symmetric) sub-envs resets with the
+    reference's own reset seeds and replays mu_theta for t_i steps, landing exactly on
+    s_{t_i} (verified) with the same env RNG state, before playing its branch action. In
+    standard mode the reference rollout itself is the nominal branch: it provides both
+    s_{t_i} and Q-_i, so only one extra rollout per sample is needed.
 
-    Q-function sampling requires restarting the system at s_t with a chosen initial
-    action, which the paper obtains from a simulator that can reset and reproduce the
-    same stochastic environment (Section 3). Here that is done by replaying: every
-    sub-env of the side pool resets with its reference's own reset seed and replays
-    the T_Q deterministic policy steps of the state sampler, which lands it exactly on
-    s_t. The replayed states are verified against the reference ones, so an
-    environment whose randomness does not follow from its reset seed fails loudly
-    instead of silently biasing the estimator.
+    A sample whose episode terminated before reaching t_i contributes a zero gradient
+    and still counts in the average over M (unbiased: the terminal state is absorbing).
 
-    :param mu: Smoothing parameter (mu > 0), the action-perturbation radius.
-    :param n_rollouts: N, the Monte-Carlo rollout pairs averaged per state (N = 1 is
-        no variance reduction). Only pays off in environments with randomness beyond
-        the initial state, since the pairs are otherwise identical by construction.
+    :param sigma: Positive action-perturbation radius (mu in the paper).
+    :param batch_size: M, the number of samples per update; must equal env.num_envs.
     :param mode: "standard" (ZDPG) or "symmetric" (ZDPG-S), see MODES.
-    :param use_crn: Give the two rollouts of a pair the same post-branch environment
-        noise (common random numbers). The pair already starts from the very same
-        state; this extends the sharing to the rest of the rollout.
-    :param env_id: Gym id used to build the Q-sampling pool of 2 * N * n_envs sub-envs.
+    :param sampling_mode: "normal" or "sphere", see SAMPLING_MODES.
+    :param horizon_mode: "auto", "finite" or "geometric", see HORIZON_MODES.
+    :param env_id: Gym id used to build the branch pool.
     :param env_kwargs: Extra kwargs for that pool's environments; must match the ones
         of the training env, otherwise the replayed states cannot agree.
-    :param gamma: Must be in (0, 1): it is the parameter of the geometric horizons
-        that make both samplers unbiased, so gamma = 1 has no meaning here.
 
-    All other arguments follow TrajectoryOnPolicyAlgorithm. Actions are always
-    deterministic and log_std is frozen, as the policy is a deterministic map.
-    One iteration costs at most n_envs * (1 + 4 * N) * T_Q + 2 * N * n_envs
-    transitions -- the state sampler, then each pool sub-env's replay and its own
-    T_Q + 1 Q-rollout steps -- so a complete update may overshoot learn()'s
-    timestep budget.
+    Cost per update (finite mode), including the replayed prefixes: at most 2 * M * H
+    steps for standard (reference to H + one branch to H), and sum_i (t_i + 1) + 2 * M * H
+    for symmetric (reference only up to s_{t_i} + two branches to H), i.e. about
+    2.5 * M * H on average. In symmetric mode train/mean_return is not logged, since the
+    reference rollouts stop at the branch state; use eval/* instead.
     """
 
     policy_aliases: ClassVar[dict[str, type[BasePolicy]]] = {
@@ -104,13 +115,14 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
         learning_rate: Union[float, Schedule] = 1e-3,
         n_steps: int = 1000,
         gamma: float = 0.99,
-        mu: float = 0.05,
-        n_rollouts: int = 1,
+        sigma: float = 0.1,
+        batch_size: int = 1,
         mode: str = "standard",
-        use_crn: bool = True,
+        sampling_mode: str = "normal",
+        horizon_mode: str = "auto",
         env_id: str = None,
         env_kwargs: Optional[dict[str, Any]] = None,
-        max_grad_norm: Optional[float] = None,
+        max_grad_norm: Optional[float] = 0.5,
         use_sde: bool = False,
         sde_sample_freq: int = -1,
         rollout_buffer_class: Optional[type[TrajectoryBuffer]] = None,
@@ -125,26 +137,29 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
     ):
-        if not np.isfinite(mu) or mu <= 0:
-            raise ValueError("[ZDPG] mu must be finite and strictly positive")
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            raise ValueError("[ZDPG] sigma must be finite and strictly positive")
         if mode not in MODES:
             raise ValueError(f"[ZDPG] mode must be one of {MODES}, but got {mode}")
-        if not isinstance(n_rollouts, int) or isinstance(n_rollouts, bool) or n_rollouts < 1:
-            raise ValueError("[ZDPG] n_rollouts must be a positive integer")
+        if sampling_mode not in SAMPLING_MODES:
+            raise ValueError(f"[ZDPG] sampling_mode must be one of {SAMPLING_MODES}, but got {sampling_mode}")
+        if horizon_mode not in HORIZON_MODES:
+            raise ValueError(f"[ZDPG] horizon_mode must be one of {HORIZON_MODES}, but got {horizon_mode}")
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("[ZDPG] batch_size must be a positive integer")
         if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
             raise ValueError("[ZDPG] n_steps must be a positive integer")
-        if not np.isfinite(gamma) or not 0 < gamma < 1:
-            # Both samplers draw their horizon from Geom(1 - gamma): gamma = 1 gives an
-            # almost surely infinite horizon and gamma = 0 a degenerate one-step problem.
-            raise ValueError("[ZDPG] gamma must be strictly between 0 and 1")
+        if not np.isfinite(gamma) or not 0 <= gamma <= 1:
+            raise ValueError("[ZDPG] gamma must be between 0 and 1")
+        if horizon_mode == "geometric" and gamma >= 1:
+            # Geom(1 - gamma) is almost surely infinite for gamma = 1.
+            raise ValueError("[ZDPG] horizon_mode='geometric' needs gamma < 1; use 'finite' for gamma = 1")
         if use_sde:
             raise ValueError("[ZDPG] the policy is deterministic; use_sde must be False")
 
         policy_kwargs = dict(policy_kwargs or {})
         # The policy is a deterministic map s -> a; there is no action distribution to learn.
         policy_kwargs["learn_std"] = False
-        # Algorithm 1's update is theta + alpha * g, i.e. plain stochastic gradient ascent.
-        policy_kwargs.setdefault("optimizer_class", th.optim.SGD)
         super().__init__(
             policy,
             env,
@@ -167,16 +182,16 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
             supported_action_spaces=(spaces.Box,),
         )
 
-        self.mu = float(mu)
-        self.n_rollouts = n_rollouts
+        self.sigma = float(sigma)
+        self.batch_size = batch_size
         self.mode = mode
-        self.use_crn = use_crn
+        self.sampling_mode = sampling_mode
+        self.horizon_mode = horizon_mode
         self.env_id = env_id
         self.env_kwargs = env_kwargs if env_kwargs is not None else {}
         self.perturbed_env_wrapper_class = perturbed_env_wrapper_class
         self.perturbed_env_wrapper_kwargs = perturbed_env_wrapper_kwargs or {}
         self._n_updates = 0
-        self._n_iterations = 0
 
         self.name = "ZDPG" if mode == "standard" else "ZDPG-S"
 
@@ -186,57 +201,80 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
     def _setup_model(self) -> None:
         super()._setup_model()
 
-        # Dedicated RNG streams for the three stochastic ingredients of the estimator
-        # (random horizons, env seeding, action perturbations), all spawned from
-        # self.seed. Deliberately NOT drawn from the global numpy/torch streams, so that
-        # re-running with the same seed stays bit-identical by construction rather than
-        # by accident of what else happens to consume those streams.
-        horizon_seed, episode_seed, perturbation_seed = np.random.SeedSequence(self.seed).spawn(3)
-        self._horizon_rng = np.random.default_rng(horizon_seed)
-        self._episode_seed_rng = np.random.default_rng(episode_seed)
-        self._perturbation_rng = np.random.default_rng(perturbation_seed)
-
+        if self.n_envs != self.batch_size:
+            raise ValueError(
+                f"[ZDPG] env.num_envs must equal batch_size: got {self.n_envs} envs but "
+                f"batch_size={self.batch_size}. Build the training env with n_envs=batch_size "
+                f"(one sub-env per sample)."
+            )
         # Checked here rather than in __init__ so that load() -- which rebuilds the model
         # with default arguments before restoring the saved ones -- still works.
         if self.env_id is None:
-            raise ValueError("[ZDPG] env_id must be provided to build the Q-sampling pool")
+            raise ValueError("[ZDPG] env_id must be provided to build the branch pool")
 
-        # Sub-env (i * N + n) * 2 + b estimates Q for reference state i, rollout pair n,
-        # branch b (0 = perturbed initial action, 1 = nominal one).
-        self._group_width = 2 * self.n_rollouts
+        # Same dedicated RNG streams as FDPG (env reseeding, perturbation sampling), plus
+        # one for the branch times, all seeded from self.seed and independent of the
+        # global numpy/torch streams.
+        self._episode_seed_rng = np.random.default_rng(self.seed)
+        self._perturbation_rng = None
+        if self.seed is not None:
+            self._perturbation_rng = th.Generator(device=self.device)
+            self._perturbation_rng.manual_seed(self.seed)
+        self._horizon_rng = np.random.default_rng(np.random.SeedSequence(self.seed).spawn(1)[0])
+
+        # Sub-env j is the branch of sample j % M; in symmetric mode j < M is the + branch
+        # and j >= M the - branch, in standard mode there is only the + branch.
+        self._branch_width = self.n_envs * (2 if self.mode == "symmetric" else 1)
         self._q_env = make_vec_env(
             self.env_id,
-            n_envs=self.n_envs * self._group_width,
+            n_envs=self._branch_width,
             env_kwargs=self.env_kwargs,
             vec_env_cls=DummyVecEnv,
             wrapper_class=self.perturbed_env_wrapper_class,
             wrapper_kwargs=self.perturbed_env_wrapper_kwargs,
         )
+        self._branch_buffer = self.rollout_buffer_class(
+            self.n_steps, self.observation_space, self.action_space,
+            device=self.device, gamma=self.gamma, n_envs=self._branch_width,
+        )
         # NOTE: the pool is not seeded here; every iteration reseeds it to replay the
-        # reset seeds of the state sampler (see _collect_q_estimates).
-        self._can_reseed_noise = True
+        # reset seeds of the reference rollout (see _collect_branches).
+
+        # Horizon: the env's time limit (TimeLimit wrapper) capped by n_steps.
+        self._time_limit = self._q_env.get_attr("spec")[0].max_episode_steps
+        self._horizon = min(self.n_steps, self._time_limit) if self._time_limit else self.n_steps
+        if self.horizon_mode == "auto":
+            finite = self.gamma >= 1 or self._time_limit is not None
+            self._resolved_horizon_mode = "finite" if finite else "geometric"
+        else:
+            self._resolved_horizon_mode = self.horizon_mode
+        if self._resolved_horizon_mode == "geometric" and self.gamma >= 1:
+            raise ValueError("[ZDPG] horizon_mode='geometric' needs gamma < 1; use 'finite' for gamma = 1")
+        if self.verbose >= 1:
+            print(f"[ZDPG] horizon_mode={self.horizon_mode} resolved to "
+                  f"'{self._resolved_horizon_mode}' (H={self._horizon}, gamma={self.gamma})")
+        self._warned_truncation = False
 
         self._action_low = th.as_tensor(self.action_space.low, device=self.device)
         self._action_high = th.as_tensor(self.action_space.high, device=self.device)
 
         self._episode_seeds = None
-        self._states = None
-        self._u = None
-        self._q_hat = None
-        self._q_difference = None
-        self._valid = None
-        self._horizon = 0
-        self._horizon_truncated = False
+        self._step_caps = None
+        self._sample = None
 
         if self.env is not None:
             self._check_normalization(self.env)
+
+    @property
+    def resolved_horizon_mode(self) -> str:
+        return self._resolved_horizon_mode
 
     @staticmethod
     def _check_normalization(env: VecEnv) -> None:
         normalizer = unwrap_vec_normalize(env)
         if normalizer is not None:
             raise ValueError(
-                "[ZDPG] the Q-sampling pool is built from raw environments, so a "
+                "[ZDPG] the branch pool is built from raw environments, so a "
                 "VecNormalize training env would compare normalized reference states "
                 "and returns against unnormalized rollouts. Drop VecNormalize."
             )
@@ -244,140 +282,133 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
     def _reset_env(self, env: VecEnv) -> np.ndarray:
         # Explicit seed drawn from our own dedicated RNG (see _setup_model) rather than
         # env.seed(None), which would silently fall back to the global numpy RNG stream.
-        # The seeds are recorded because the Q-sampling pool has to replay them.
-        base_seed = int(self._episode_seed_rng.integers(0, 2**31 - self.n_envs))
+        # The seeds are recorded because the branch pool has to replay them.
+        base_seed = int(self._episode_seed_rng.integers(0, 2**31 - 1))
         self._episode_seeds = np.array(env.seed(base_seed))
         return env.reset()
 
+    def _rollout_step_caps(self) -> Optional[np.ndarray]:
+        return self._step_caps
+
     def _clip(self, actions: th.Tensor) -> th.Tensor:
-        """Same action-bound handling as the base collector, applied to both branches so
-        that the two Q-values of a pair always refer to actions the system can execute."""
+        """Same action-bound handling as the base collector, applied to the branches so
+        that the Q-values always refer to actions the system can execute."""
         return th.max(th.min(actions, self._action_high), self._action_low)
 
-    def _policy_actions(self, obs: np.ndarray) -> np.ndarray:
-        """pi_theta(s), clipped: the action the deterministic policy plays at s."""
-        with th.no_grad():
-            actions, _ = self.policy(obs_as_tensor(obs, self.device), deterministic=True)
-        return self._clip(actions).cpu().numpy()
+    def _sample_perturbations(self, n_samples: int) -> tuple[th.Tensor, th.Tensor]:
+        """Draw u (n_samples, action_dim) and q(u), with FDPG's sampling conventions."""
+        action_dim = get_action_dim(self.action_space)
+        u = th.randn(n_samples, action_dim, device=self.device, generator=self._perturbation_rng)
+        if self.sampling_mode == "normal":
+            q_u = u
+        elif self.sampling_mode == "sphere":
+            u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            q_u = action_dim * u
+        else:
+            raise ValueError(f"[ZDPG] sampling_mode must be one of {SAMPLING_MODES}, but got {self.sampling_mode}")
+        return u, q_u
 
-    def _step_pool(self, actions: np.ndarray, active: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _sample_branch_times(self, n_samples: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        One lockstep step of the Q-sampling pool. Rewards of sub-envs that already
-        reached a terminal state are zeroed (absorbing convention) and their steps are
-        not counted: only transitions that actually feed the estimator are charged to
-        the training budget, as everywhere else in the repo.
+        Draw each sample's branch time t and end time e (the Q-rollouts cover steps
+        t, ..., e - 1), independently across samples.
 
-        :return: (observations, masked rewards, updated active mask)
+        - finite:    t ~ Unif{0, ..., H-1}, e = H.
+        - geometric: t = T_s, e = T_s + T_Q + 1 with T_s, T_Q ~ Geom(1 - gamma) on
+                     {0, 1, ...}, independent (the paper's Algorithm 1 reuses a single
+                     draw for both, which biases the estimator). Both branches of a
+                     sample share e, i.e. T_Q.
+
+        :return: (t, e, truncated), truncated flagging geometric draws that the horizon
+            cap H cuts short (e > H).
         """
-        obs, rewards, dones, _ = self._q_env.step(actions)
-        self.num_timesteps += int(active.sum())
-        return obs, rewards * active, active & ~dones
+        H = self._horizon
+        if self._resolved_horizon_mode == "finite":
+            t = self._horizon_rng.integers(0, H, size=n_samples)
+            end = np.full(n_samples, H, dtype=np.int64)
+            return t, end, np.zeros(n_samples, dtype=bool)
+        # numpy counts trials until the first success, so the number of failures is one less.
+        t = self._horizon_rng.geometric(1.0 - self.gamma, size=n_samples) - 1
+        t_q = self._horizon_rng.geometric(1.0 - self.gamma, size=n_samples) - 1
+        end = t + t_q + 1
+        return t, end, end > H
 
-    def _reseed_pool_noise(self) -> None:
+    def _collect_branches(self, t: np.ndarray, end: np.ndarray, valid: np.ndarray,
+                          states: np.ndarray, u: th.Tensor) -> TrajectoryBuffer:
         """
-        Give every (reference state, rollout pair) its own post-branch environment noise.
-
-        All sub-envs of a group replay one and the same reset seed to reach s_t, so
-        without this the N Monte-Carlo repetitions would be bit-identical and averaging
-        them would reduce no variance at all. Only the environment's RNG is replaced,
-        never its state. Under use_crn the two branches of a pair keep the same stream,
-        which is the "reproduction of the same stochastic environment" of Section 3;
-        otherwise each branch gets an independent one.
-        """
-        if not self._can_reseed_noise:
-            return
-        for pair in range(self.n_envs * self.n_rollouts):
-            plus_seed = int(self._episode_seed_rng.integers(0, 2**31 - 1))
-            minus_seed = plus_seed if self.use_crn else int(self._episode_seed_rng.integers(0, 2**31 - 1))
-            for branch, noise_seed in enumerate((plus_seed, minus_seed)):
-                try:
-                    self._q_env.envs[2 * pair + branch].unwrapped.np_random = np.random.default_rng(noise_seed)
-                except AttributeError:
-                    warnings.warn(
-                        "[ZDPG] the environment does not expose a Gymnasium np_random "
-                        "generator, so the rollouts of a state cannot be decorrelated. "
-                        "With deterministic dynamics this is harmless (the pairs are "
-                        "exact anyway); otherwise use n_rollouts=1 and use_crn=True.",
-                        UserWarning,
-                    )
-                    self._can_reseed_noise = False
-                    return
-
-    def _check_replayed_states(self, obs: np.ndarray, states: np.ndarray, active: np.ndarray) -> None:
-        """Every still-active sub-env must sit exactly on its reference's s_t."""
-        if not active.any():
-            return
-        expected = np.repeat(states, self._group_width, axis=0)[active]
-        deviation = np.abs(np.asarray(obs)[active] - expected).max()
-        if not np.isfinite(deviation) or deviation > STATE_MATCH_ATOL:
-            raise ValueError(
-                f"[ZDPG] replaying the state sampler in the Q-sampling pool landed "
-                f"{deviation:.3e} away from the reference state (tolerance "
-                f"{STATE_MATCH_ATOL:.0e}). Q-values must be evaluated at the very state "
-                f"the gradient is taken at, so this environment cannot be used: its "
-                f"randomness is not fully determined by the reset seed, or the pool's "
-                f"env_id/env_kwargs/wrappers differ from the training env's."
-            )
-
-    def _collect_q_estimates(self, states: np.ndarray, u: np.ndarray, valid: np.ndarray) -> np.ndarray:
-        """
-        Algorithm 2, run for every (reference state, rollout pair, branch) at once.
-
-        Each sub-env first replays its reference's state sampler trajectory to reach
-        s_t, then plays its branch's initial action a_0 and follows pi_theta for the
-        remaining T_Q steps, accumulating the undiscounted reward sum
-        R(s_0, a_0) + ... + R(s_T, a_T) -- an unbiased Q-estimate precisely because the
-        horizon is geometric.
-
-        :return: the raw Q-estimates, shape (n_envs, N, 2), the last axis being the
-            perturbed and the nominal branch of each rollout pair.
+        Algorithm 2 for every sample at once, in lockstep: branch sub-env j (sample
+        i = j % M) resets with the reference's reset seed, replays mu_theta for t_i
+        steps (landing on s_{t_i}, checked), plays mu_theta(s_{t_i}) +/- sigma u_i at
+        step t_i and follows mu_theta until step end_i (capped at H) or termination.
+        Samples that are not valid never start, and cost nothing.
         """
         env = self._q_env
-        horizon, group = self._horizon, self._group_width
+        width, M = env.num_envs, self.n_envs
+        sample = np.arange(width) % M
+        sign = np.where(np.arange(width) < M, 1.0, -1.0)
+        caps = np.minimum(end, self._horizon)[sample]
+        branch_t = t[sample]
 
-        # Sub-env j replays the reset seed of reference j // group, so the deterministic
-        # steps below reproduce that reference's trajectory state by state.
-        env._seeds = [int(self._episode_seeds[j // group]) for j in range(env.num_envs)]
+        self._branch_buffer.reset()
+        # Same reset seeds as the reference: same initial state and same env RNG stream.
+        env._seeds = [int(self._episode_seeds[i]) for i in sample]
         obs = env.reset()
-        active = np.repeat(valid, group)
+        active = valid[sample].copy()
 
-        # --- replay phase: land on s_t (no reward is collected, this is Algorithm 3) ---
-        for _ in range(horizon):
-            obs, _, active = self._step_pool(self._policy_actions(obs), active)
-        if (np.repeat(valid, group) & ~active).any():
-            raise ValueError(
-                "[ZDPG] an episode ended while replaying the state sampler in the "
-                "Q-sampling pool, although the reference trajectory did not. Check that "
-                "the pool's env_id/env_kwargs/wrappers match the training env's."
+        perturbation = (self.sigma * u)[sample] * th.as_tensor(sign, dtype=u.dtype, device=self.device)[:, None]
+
+        for k in range(int(caps[active].max()) if active.any() else 0):
+            branching = active & (branch_t == k)
+            if branching.any():
+                deviation = np.abs(np.asarray(obs)[branching] - states[sample[branching]]).max()
+                if not np.isfinite(deviation) or deviation > STATE_MATCH_ATOL:
+                    raise ValueError(
+                        f"[ZDPG] replaying the reference rollout in the branch pool landed "
+                        f"{deviation:.3e} away from the reference state (tolerance "
+                        f"{STATE_MATCH_ATOL:.0e}). Q-values must be evaluated at the very state "
+                        f"the gradient is taken at, so this environment cannot be used: its "
+                        f"randomness is not fully determined by the reset seed, or the pool's "
+                        f"env_id/env_kwargs/wrappers differ from the training env's."
+                    )
+            # One forward pass per group of M sub-envs: the same batch shape as the reference
+            # rollout's, so that the replayed prefix is bit-identical (BLAS kernels, and with
+            # them float rounding, depend on the matrix shape).
+            obs_tensor = obs_as_tensor(obs, self.device)
+            with th.no_grad():
+                mu = th.cat([self.policy(chunk, deterministic=True)[0] for chunk in obs_tensor.split(M)])
+            mask =th.as_tensor(branching, device=self.device)[:, None]
+            actions = self._clip(mu + perturbation * mask).cpu().numpy()
+            new_obs, rewards, dones, _ = env.step(actions)
+
+            active_indices = np.where(active)[0]
+            self._branch_buffer.add(
+                obs[active_indices], actions[active_indices], rewards[active_indices],
+                np.zeros(len(active_indices)), env_indices=active_indices,
             )
-        self._check_replayed_states(obs, states, active)
-        self._reseed_pool_noise()
-
-        # --- initial actions: a_0 = pi_theta(s_t) + mu * u on the + branch ---
-        with th.no_grad():
-            mean_actions, _ = self.policy(obs_as_tensor(states, self.device), deterministic=True)
-        perturbation = self.mu * th.as_tensor(u, dtype=mean_actions.dtype, device=self.device)
-        plus_actions = self._clip(mean_actions + perturbation).cpu().numpy()
-        if self.mode == "symmetric":
-            minus_actions = self._clip(mean_actions - perturbation).cpu().numpy()
-        else:
-            minus_actions = self._clip(mean_actions).cpu().numpy()
-
-        actions = np.empty((env.num_envs, get_action_dim(self.action_space)), dtype=plus_actions.dtype)
-        actions[0::2] = np.repeat(plus_actions, self.n_rollouts, axis=0)
-        actions[1::2] = np.repeat(minus_actions, self.n_rollouts, axis=0)
-
-        # --- Q phase: the perturbed first action, then T_Q steps of pi_theta ---
-        q_hat = np.zeros(env.num_envs, dtype=np.float64)
-        for t in range(horizon + 1):
-            obs, rewards, active = self._step_pool(actions, active)
-            q_hat += rewards
+            # Branch interaction is real environment cost: count it, replayed prefix included.
+            self.num_timesteps += int(active.sum())
+            active &= ~dones
+            active &= (k + 1) < caps
+            obs = new_obs
             if not active.any():
                 break
-            if t < horizon:
-                actions = self._policy_actions(obs)
 
-        return q_hat.reshape(self.n_envs, self.n_rollouts, 2)
+        lengths = self._branch_buffer._traj_lengths
+        if (valid[sample] & (lengths <= branch_t)).any():
+            raise ValueError(
+                "[ZDPG] an episode ended while replaying the reference rollout in the "
+                "branch pool, although the reference did not. Check that the pool's "
+                "env_id/env_kwargs/wrappers match the training env's."
+            )
+        self._branch_buffer.compute_returns()
+        return self._branch_buffer
+
+    def _q_value(self, buffer: TrajectoryBuffer, index: int, t: int) -> float:
+        """Q estimate of a trajectory from its step t: the discounted return-to-go
+        (finite, same convention as FDPG) or the undiscounted reward sum (geometric)."""
+        if self._resolved_horizon_mode == "finite":
+            return float(buffer._returns[index][t])
+        return float(np.sum(buffer._rewards[index][t:], dtype=np.float64))
 
     def collect_rollouts(
         self,
@@ -387,122 +418,136 @@ class ZDPG(TrajectoryOnPolicyAlgorithm):
         n_rollout_steps: int,
     ) -> bool:
         """
-        Draw this iteration's random horizon, the batch of discounted-distribution states
-        (Algorithm 3, run in the training env through the base collector so that the
-        episode statistics, callbacks and timestep accounting stay the repo's), the
-        action perturbations, and the Q-estimates of both branches (Algorithm 2).
+        Collect the M reference rollouts (via the base class, so that episode statistics,
+        callbacks and timestep accounting stay the repo's), then the branch rollouts.
         """
         self._check_normalization(env)
-        self._q_difference = None
+        self._sample = None
+        M = env.num_envs
+        t, end, truncated = self._sample_branch_times(M)
 
-        # T_Q ~ Geom(1 - gamma) on {0, 1, ...}: numpy counts trials until the first
-        # success, so the number of failures is one less. Capped at the repo's horizon.
-        raw_horizon = int(self._horizon_rng.geometric(1.0 - self.gamma)) - 1
-        self._horizon = min(raw_horizon, n_rollout_steps)
-        self._horizon_truncated = raw_horizon > n_rollout_steps
+        # Each reference only runs as long as it is used; a sample whose branch time is
+        # already beyond the cap never starts.
+        # - symmetric: both Q-values come from the branches, so the reference only has to
+        #   reach s_{t_i} (t_i + 1 steps, the last one recording s_{t_i}).
+        # - standard, geometric: the reference is the nominal branch up to its end time.
+        # - standard, finite: the reference is the nominal branch up to H (no cap needed).
+        if self.mode == "symmetric":
+            self._step_caps = np.where(t >= self._horizon, 0, t + 1)
+        elif self._resolved_horizon_mode == "geometric":
+            self._step_caps = np.where(t >= self._horizon, 0, np.minimum(end, self._horizon))
+        try:
+            horizon = min(n_rollout_steps, self._horizon)
+            if not super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps=horizon):
+                return False
+        finally:
+            self._step_caps = None
 
-        if not super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps=self._horizon):
-            return False
+        # s_{t_i} is reached only if the trajectory has more than t_i steps; otherwise it
+        # terminated before (or the geometric draw was cut by the cap): zero gradient.
+        lengths = rollout_buffer._traj_lengths
+        valid = lengths > t
+        states = np.zeros((M, *self.observation_space.shape), dtype=self.observation_space.dtype)
+        for i in np.where(valid)[0]:
+            states[i] = rollout_buffer._obs[i][t[i]]
 
-        # The base collector leaves _last_obs on the state reached after T_Q steps,
-        # which is exactly Algorithm 3's output s_T.
-        states = np.array(self._last_obs, copy=True)
-        if self._horizon == 0:
-            valid = np.ones(env.num_envs, dtype=bool)
-        else:
-            # A sub-env whose episode ended before completing the T_Q steps was auto-reset
-            # by the VecEnv, so its observation belongs to a fresh episode rather than to
-            # the discounted state distribution: it sits out this iteration. Terminating
-            # exactly on the last step is caught by _last_episode_starts.
-            completed = rollout_buffer._traj_lengths == self._horizon
-            valid = completed & ~np.asarray(self._last_episode_starts, dtype=bool)
+        u, q_u = self._sample_perturbations(M)
+        branches = self._collect_branches(t, end, valid, states, u)
 
-        u = self._perturbation_rng.standard_normal((env.num_envs, get_action_dim(self.action_space)))
+        q_plus, q_minus = np.zeros(M), np.zeros(M)
+        for i in np.where(valid)[0]:
+            q_plus[i] = self._q_value(branches, i, t[i])
+            if self.mode == "symmetric":
+                q_minus[i] = self._q_value(branches, M + i, t[i])
+            else:
+                # The reference rollout is the nominal branch.
+                q_minus[i] = self._q_value(rollout_buffer, i, t[i])
 
-        if valid.any():
-            q_hat = self._collect_q_estimates(states, u, valid)
-        else:
-            q_hat = np.zeros((env.num_envs, self.n_rollouts, 2))
+        if truncated.any() and not self._warned_truncation:
+            warnings.warn(
+                f"[ZDPG] geometric horizon draws exceed the horizon cap H={self._horizon} "
+                f"(n_steps / env time limit) and are truncated, which biases the estimator. "
+                f"Increase n_steps or use horizon_mode='finite'. The truncated fraction is "
+                f"logged as train/truncated_fraction.",
+                UserWarning,
+            )
+            self._warned_truncation = True
 
-        self._states = states
-        self._u = u
-        self._valid = valid
-        self._q_hat = q_hat
-        # The N rollout pairs are the Monte-Carlo variance reduction of Algorithm 1.
-        q_plus, q_minus = q_hat[:, :, 0].mean(axis=1), q_hat[:, :, 1].mean(axis=1)
-        self._q_plus, self._q_minus = q_plus, q_minus
-        # Lemma 1's two representations only differ by which action the second rollout
-        # starts from, and by the width of the difference quotient.
-        denominator = 2 * self.mu if self.mode == "symmetric" else self.mu
-        self._q_difference = (q_plus - q_minus) / denominator
+        self._sample = dict(t=t, valid=valid, truncated=truncated, states=states, q_u=q_u,
+                            q_plus=q_plus, q_minus=q_minus)
         return True
 
+    def _objective(self) -> th.Tensor:
+        """
+        1/M sum_i w(t_i) <mu_theta(s_i), (Q+_i - Q-_i) / (sigma or 2 sigma) q(u_i)>, whose
+        gradient is the ZDPG estimate (a vector-Jacobian product through mu_theta at the
+        branch states only). Invalid samples carry a zero coefficient but count in M.
+        """
+        s = self._sample
+        denominator = 2 * self.sigma if self.mode == "symmetric" else self.sigma
+        if self._resolved_horizon_mode == "finite":
+            weights = self._horizon * self.gamma ** s["t"].astype(np.float64)
+        else:
+            weights = np.full(len(s["t"]), 1.0 / (1.0 - self.gamma))
+        coefficients = np.where(s["valid"], weights * (s["q_plus"] - s["q_minus"]) / denominator, 0.0)
+
+        mean_actions, _ = self.policy(obs_as_tensor(s["states"], self.device), deterministic=True)
+        vjp_vectors = th.as_tensor(coefficients, dtype=mean_actions.dtype, device=self.device)[:, None] * s["q_u"]
+        return (mean_actions * vjp_vectors).sum(-1).mean()
+
     def train(self) -> None:
-        if self._q_difference is None:
+        if self._sample is None:
             raise RuntimeError("[ZDPG] collect_rollouts() must run before train()")
+        self.policy.set_training_mode(True)
+        self._update_learning_rate(self.policy.optimizer)
 
-        self._n_iterations += 1
-        valid = self._valid
-        n_valid = int(valid.sum())
+        objective = self._objective()
+        loss = -objective
 
-        if n_valid > 0:
-            # Counted only here: an iteration whose states were all discarded applies no
-            # optimizer step, so counting it would stretch the x-axis with empty ticks.
-            self._n_updates += 1
-            self.policy.set_training_mode(True)
-            self._update_learning_rate(self.policy.optimizer)
+        self.policy.optimizer.zero_grad()
+        loss.backward()
+        gradient_norm = th.norm(
+            th.stack([p.grad.norm() for p in self.policy.parameters() if p.grad is not None])
+        ).item()
+        if self.max_grad_norm is not None:
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+        self.policy.optimizer.step()
 
-            # grad_theta <pi_theta(s_t), (Q+ - Q-) / mu * u> is exactly Algorithm 1's
-            # Psi_t * (Q+ - Q-) / mu * u, so the quasi-gradient is obtained from the
-            # repo's usual backward()/optimizer.step() path. Only pi_theta carries a
-            # gradient: the states, the perturbations and the Q-values are data.
-            mean_actions, _ = self.policy(
-                obs_as_tensor(self._states[valid], self.device), deterministic=True
-            )
-            weights = th.as_tensor(
-                self._q_difference[valid, None] * self._u[valid],
-                dtype=mean_actions.dtype,
-                device=self.device,
-            )
-            objective = (mean_actions * weights).sum(-1).mean() / (1.0 - self.gamma)
-            loss = -objective
-
-            self.policy.optimizer.zero_grad()
-            loss.backward()
-            gradient_norm = th.norm(
-                th.stack([p.grad.norm() for p in self.policy.parameters() if p.grad is not None])
-            ).item()
-            if self.max_grad_norm is not None:
-                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.policy.optimizer.step()
-
-            self.logger.record("train/policy_loss", loss.item())
-            self.logger.record("train/objective", objective.item())
-            self.logger.record("train/gradient_norm", gradient_norm)
-            self.logger.record("train/mean_q_plus", float(self._q_plus[valid].mean()))
-            self.logger.record("train/mean_q_minus", float(self._q_minus[valid].mean()))
-            self.logger.record("train/mean_q_difference", float(self._q_difference[valid].mean()))
-            # Spread of the N rollouts of a branch: zero means the repetitions carried no
-            # new randomness, so n_rollouts > 1 is buying no variance reduction at all.
-            self.logger.record("train/q_rollout_std", float(self._q_hat[valid].std(axis=1).mean()))
-
+        s = self._sample
+        valid = s["valid"]
+        self._n_updates += 1
         # Not excluded from tensorboard (unlike most "info" fields): this needs to be a
         # real synced metric so wandb can plot other train/* curves against it as a custom
         # x-axis (parameter updates rather than env timesteps).
         self.logger.record("train/n_updates", self._n_updates)
-        self.logger.record("train/n_iterations", self._n_iterations)
-        self.logger.record("train/n_valid_states", n_valid)
-        self.logger.record("train/horizon", self._horizon)
-        self.logger.record("train/horizon_truncated", float(self._horizon_truncated))
-        self.logger.record("train/mu", self.mu)
-        self.logger.record("train/n_rollouts", self.n_rollouts)
+        self.logger.record("train/policy_loss", loss.item())
+        self.logger.record("train/objective", objective.item())
+        self.logger.record("train/n_valid_trajectories", int(valid.sum()))
+        if self._resolved_horizon_mode == "finite" and self.mode == "standard":
+            # The reference rollouts are complete H-step trajectories of the nominal policy
+            # (in symmetric mode they stop at the branch state, so there is no such return).
+            ref_returns = [
+                self.rollout_buffer._returns[i][0]
+                for i in range(self.n_envs) if self.rollout_buffer._traj_lengths[i] > 0
+            ]
+            self.logger.record("train/mean_return", float(np.mean(ref_returns)))
+        if hasattr(self.policy, "log_std"):
+            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+        self.logger.record("train/gradient_norm", gradient_norm)
+        if valid.any():
+            self.logger.record("train/mean_q_plus", float(s["q_plus"][valid].mean()))
+            self.logger.record("train/mean_q_minus", float(s["q_minus"][valid].mean()))
+            self.logger.record("train/mean_q_difference", float((s["q_plus"] - s["q_minus"])[valid].mean()))
+        self.logger.record("train/mean_t", float(s["t"].mean()))
+        self.logger.record("train/truncated_fraction", float(s["truncated"].mean()))
+        self.logger.record("train/sigma", self.sigma)
+        self.logger.record("train/horizon_mode", self._resolved_horizon_mode, exclude="tensorboard")
 
-        self._q_difference = None
+        self._sample = None
 
     def _excluded_save_params(self) -> list[str]:
         return super()._excluded_save_params() + [
-            "_q_env", "_states", "_u", "_valid", "_q_hat", "_q_plus", "_q_minus",
-            "_q_difference", "_episode_seeds",
+            "_q_env", "_branch_buffer", "_sample", "_episode_seeds", "_step_caps",
         ]
 
     def learn(
