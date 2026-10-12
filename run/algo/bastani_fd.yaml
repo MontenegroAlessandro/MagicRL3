@@ -1,0 +1,7 @@
+name: bastani_fd
+
+sigma: 0.01              # lambda: parameter-space perturbation radius (no action noise).
+sampling_mode: normal    # normal | sphere, over the d_Theta policy parameters
+use_crn: false           # Independent +/- rollouts, as in FDPG's default.
+# batch_size (number of directions) is not set here on purpose -- like FDPG it equals
+# experiment.n_envs, so run.py derives it; each direction costs one + and one - trajectory.

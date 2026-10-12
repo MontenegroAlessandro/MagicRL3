@@ -161,6 +161,18 @@ class ActorOnlyPolicy(BasePolicy):
             for module, gain in module_gains.items():
                 module.apply(partial(self.init_weights, gain=gain))
 
+        # Linear policy (no hidden layers): the mean action is exactly a = K s. K starts
+        # at zero and the bias is pinned to zero and frozen, whatever ortho_init says.
+        # A frozen bias gets no gradient, and the FD searches skip parameters without
+        # requires_grad, so no algorithm ever moves it.
+        if not self.net_arch and isinstance(self.action_net, nn.Linear):
+            with th.no_grad():
+                self.action_net.weight.zero_()
+                if self.action_net.bias is not None:
+                    self.action_net.bias.zero_()
+            if self.action_net.bias is not None:
+                self.action_net.bias.requires_grad_(False)
+
         self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> tuple[th.Tensor, th.Tensor]:

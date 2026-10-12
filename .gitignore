@@ -190,3 +190,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Local launch scripts (kept on disk, not pushed). setup.sh is the documented
+# installer, so it stays tracked.
+*.sh
+!/setup.sh

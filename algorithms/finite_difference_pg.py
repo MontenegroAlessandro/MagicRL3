@@ -11,6 +11,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.preprocessing import get_action_dim
+from stable_baselines3.common.env_util import make_vec_env
 
 from algorithms.trajectory_onpolicy_method import TrajectoryOnPolicyAlgorithm
 from buffers import TrajectoryBuffer
@@ -76,6 +77,9 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         policy_kwargs: Optional[dict[str, Any]] = None,
         verbose: int = 0,
         seed: Optional[int] = None,
+        use_crn: bool = False,
+        perturbed_env_wrapper_class=None,   # <-- optional, see note below
+        perturbed_env_wrapper_kwargs=None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
     ):
@@ -98,12 +102,7 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
             device=device,
             seed=seed,
             _init_setup_model=False,
-            supported_action_spaces=(
-                spaces.Box,
-                spaces.Discrete,
-                spaces.MultiDiscrete,
-                spaces.MultiBinary,
-            ),
+            supported_action_spaces=(spaces.Box),
         )
 
         self.sigma = sigma
@@ -130,9 +129,23 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         assert env_id is not None, err_msg
         self.env_id = env_id
         self.env_kwargs = env_kwargs if env_kwargs is not None else {}
-        # step mode needs one sub-env per candidate perturbation timestep;
-        # trajectory mode perturbs a single trajectory end-to-end.
-        self.perturbed_width = self.n_steps if mode == "step" else 1
+        # step mode needs one sub-env per (reference trajectory, candidate perturbation
+        # timestep) pair, so every trajectory's candidates can be collected in one batched
+        # rollout; trajectory mode needs one sub-env per reference trajectory.
+        self.perturbed_width = self.n_steps * self.batch_size if mode == "step" else self.batch_size
+
+
+        self.use_crn = use_crn
+        """
+        If True: perturbed rollouts replay the SAME environment randomness as their
+        reference trajectory (common random numbers) -- lower variance, at the cost
+        of forcing identical seeds across the perturbed sub-envs. If False (default):
+        each perturbed rollout gets its own independently-drawn seed. The estimator
+        stays unbiased either way -- CRN only removes environment-noise variance
+        from the g - b comparison, it isn't required for correctness.
+        """
+        self.perturbed_env_wrapper_class = perturbed_env_wrapper_class
+        self.perturbed_env_wrapper_kwargs = perturbed_env_wrapper_kwargs or {}
 
         if _init_setup_model:
             self._setup_model()
@@ -162,14 +175,6 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         )
         assert self.n_envs == self.batch_size, err_msg
 
-        self._perturbed_env = DummyVecEnv([
-            lambda: gym.make(self.env_id, **self.env_kwargs) for _ in range(self.perturbed_width)
-        ])
-        self._perturbed_buffer = self.rollout_buffer_class(
-            self.n_steps, self.observation_space, self.action_space,
-            device=self.device, gamma=self.gamma, n_envs=self.perturbed_width,
-        )
-
         # Dedicated RNG streams for the two stochastic ingredients of the estimator
         # (per-iteration env reseeding, perturbation sampling), seeded once from
         # self.seed. Deliberately NOT drawing from the global numpy/torch RNG streams
@@ -182,6 +187,20 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         if self.seed is not None:
             self._perturbation_rng = th.Generator(device=self.device)
             self._perturbation_rng.manual_seed(self.seed)
+
+        self._perturbed_env = make_vec_env(
+            self.env_id,
+            n_envs=self.perturbed_width,
+            env_kwargs=self.env_kwargs,
+            vec_env_cls=DummyVecEnv,
+            wrapper_class=self.perturbed_env_wrapper_class,
+            wrapper_kwargs=self.perturbed_env_wrapper_kwargs,
+        )
+        self._perturbed_buffer = self.rollout_buffer_class(
+            self.n_steps, self.observation_space, self.action_space,
+            device=self.device, gamma=self.gamma, n_envs=self.perturbed_width,
+        )
+        # NOTE: the perturbed env is not seeded since it will be seeded when collecting the perturbed rollout.
 
     def _sample_perturbations(self, n_trajectories: int, horizon: int) -> tuple[th.Tensor, th.Tensor]:
         """
@@ -231,35 +250,25 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         self._episode_seeds = np.array(env.seed(base_seed))  # records one seed per env
         return env.reset()
 
-    def _collect_perturbed_rollout(
-        self, traj_seed: int, u_i: th.Tensor, q_u_i: th.Tensor
-    ) -> TrajectoryBuffer:
+    def _collect_perturbed_rollouts_batch(self, u: th.Tensor, q_u: th.Tensor) -> TrajectoryBuffer:
         """
-        Detached rollout for ONE reference trajectory: replays it under CRN and injects the
-        perturbation(s) specified by self.mode.
-        - mode == "trajectory": width == 1. The single sub-env is perturbed at EVERY
-                                timestep t with sigma * u_i[t].
-        - mode == "step":       width == self.n_steps. Sub-env i is perturbed ONLY at its
-                                own timestep t == i -- zero before i, zero after i -- and
-                                plays mu_theta(s) exactly like the reference everywhere else.
-        Returns the detached buffer with compute_returns() already called.
+        Trajectory mode only: one sub-env per reference trajectory, all `batch_size`
+        perturbed rollouts collected in lockstep -- replaces `batch_size` sequential
+        single-env calls with one call that batches the policy forward pass.
         """
         env = self._perturbed_env
         width = env.num_envs
-
-        if self.mode == "trajectory":
-            assert width == 1, f"[FDPG] trajectory mode needs a width-1 perturbed env, got {width}"
-        elif self.mode == "step":
-            assert width == self.n_steps, (
-                f"[FDPG] step mode needs a width-{self.n_steps} perturbed env "
-                f"(one sub-env per candidate perturbation timestep), got {width}"
-            )
+        assert width == self.batch_size, (
+            f"[FDPG] trajectory mode's batched collector needs a width-{self.batch_size} "
+            f"perturbed env pool, got {width}"
+        )
 
         self._perturbed_buffer.reset()
 
-        env.seed(traj_seed)
-        if hasattr(env, "_seeds"):
-            env._seeds = [traj_seed] * width  # CRN: identical seed across all sub-envs
+        if self.use_crn:
+            env._seeds = [int(s) for s in self._episode_seeds]   # sub-env i replays reference trajectory i's randomness
+        else:
+            env.seed(int(self._episode_seed_rng.integers(0, 2**31 - 1)))  # auto-increment -> fresh, distinct per sub-env
         obs = env.reset()
 
         low = th.as_tensor(self.action_space.low, device=self.device)
@@ -269,22 +278,81 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         for t in range(self.n_steps):
             obs_tensor = obs_as_tensor(obs, self.device)
             with th.no_grad():
-                mu, _ = self.policy(obs_tensor, deterministic=True)
+                mu, _ = self.policy(obs_tensor, deterministic=True)   # ONE batched forward pass, all `width` trajectories
 
-            if self.mode == "trajectory":
-                # applied always -- every step of the single perturbed trajectory
-                perturbation = self.sigma * u_i[t].unsqueeze(0)  # (1, action_dim)
-            else:
-                # applied ONLY at sub-env t's own timestep t -- zero before AND after.
-                perturbation = th.zeros_like(mu)
-                perturbation[t] = self.sigma * u_i[t]
-
+            perturbation = self.sigma * u[:, t, :]   # (width, action_dim) -- trajectory i's own u, at step t
             clipped = th.max(th.min(mu + perturbation, high), low).cpu().numpy()
             new_obs, rewards, dones, infos = env.step(clipped)
 
             active_indices = np.where(active)[0]
             self._perturbed_buffer.add(
                 obs[active_indices], clipped[active_indices], rewards[active_indices],
+                np.zeros(len(active_indices)), env_indices=active_indices,
+            )
+            active &= ~dones
+            obs = new_obs
+            if not active.any():
+                break
+
+        self._perturbed_buffer.compute_returns()
+        self.num_timesteps += int(self._perturbed_buffer._traj_lengths.sum())
+        return self._perturbed_buffer
+
+    def _collect_perturbed_rollouts_batch_step(self, u: th.Tensor, q_u: th.Tensor) -> TrajectoryBuffer:
+        """
+        Step mode, batched: one sub-env per (reference trajectory, candidate perturbation
+        timestep) pair -- width = batch_size * n_steps, sub-env `i * n_steps + t` being
+        trajectory i's candidate t. Sub-env `i * n_steps + t` is perturbed ONLY at its own
+        local timestep t (zero before AND after) and plays mu_theta(s) exactly like the
+        reference everywhere else -- replaces `batch_size` sequential width-n_steps rollouts
+        with one call that batches the policy forward pass across all of them at once.
+        """
+        env = self._perturbed_env
+        width = env.num_envs
+        assert width == self.batch_size * self.n_steps, (
+            f"[FDPG] step mode's batched collector needs a width-{self.batch_size * self.n_steps} "
+            f"perturbed env pool (one sub-env per (trajectory, candidate timestep) pair), got {width}"
+        )
+
+        self._perturbed_buffer.reset()
+
+        if self.use_crn:
+            # sub-env i*n_steps + t replays reference trajectory i's own randomness, for every t
+            env._seeds = [int(s) for s in np.repeat(self._episode_seeds, self.n_steps)]
+        else:
+            # one fresh base seed per trajectory i, auto-incremented across its n_steps
+            # candidates -- matches what a bare env.seed(base_seed) call assigns to a
+            # width-n_steps pool, just drawn once per trajectory instead of once per call.
+            base_seeds = self._episode_seed_rng.integers(0, 2**31 - 1, size=self.batch_size)
+            env._seeds = [
+                int(base_seeds[i]) + t for i in range(self.batch_size) for t in range(self.n_steps)
+            ]
+        obs = env.reset()
+
+        low = th.as_tensor(self.action_space.low, device=self.device)
+        high = th.as_tensor(self.action_space.high, device=self.device)
+        active = np.ones(width, dtype=bool)
+
+        # sub-env i*n_steps + c is perturbed only once the shared loop time t reaches c.
+        candidate_offsets = th.arange(self.batch_size, device=self.device) * self.n_steps
+
+        for t in range(self.n_steps):
+            obs_tensor = obs_as_tensor(obs, self.device)
+            with th.no_grad():
+                mu, _ = self.policy(obs_tensor, deterministic=True)   # ONE batched forward pass, all `width` sub-envs
+
+            perturbation = th.zeros_like(mu)
+            perturbed_idx = candidate_offsets + t   # sub-env i*n_steps + t, for every trajectory i
+            perturbation[perturbed_idx] = self.sigma * u[:, t, :]
+
+            clipped = th.max(th.min(mu + perturbation, high), low).cpu().numpy()
+            new_obs, rewards, dones, infos = env.step(clipped)
+
+            active_indices = np.where(active)[0]
+            self._perturbed_buffer.add(
+                obs[active_indices],
+                clipped[active_indices],  # not a problem, the action will not be used for gradient computation
+                rewards[active_indices],
                 np.zeros(len(active_indices)),
                 env_indices=active_indices,
             )
@@ -310,10 +378,11 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
     ) -> bool:
         """
         Collect the batch_size reference trajectories (via the base class, using the
-        deterministic policy), then, for each one, collect its perturbed counterpart(s)
-        under CRN and immediately extract the (state, return, q(u)) terms train() needs
-        for the g-side of the g - b estimator. The b-side is read directly out of
-        `self.rollout_buffer` inside train() since it stays valid until the next call.
+        deterministic policy), then their perturbed counterpart(s) in one batched call.
+        Both the b-side (read directly out of `self.rollout_buffer`, which stays valid
+        until the next call) and g-side extraction are left to train(), which batches
+        them -- and the forward passes they feed -- across the whole batch at once instead
+        of one trajectory (or candidate timestep) at a time.
         """
         continue_training = super().collect_rollouts(env, callback, rollout_buffer, n_rollout_steps)
         if not continue_training:
@@ -321,95 +390,177 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
 
         self._u, self._q_u = self._sample_perturbations(self.batch_size, self.n_steps)
 
-        self._g_terms: list[Optional[tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]]] = []
-        for i in range(self.batch_size):
-            traj_seed = int(self._episode_seeds[i])
-            perturbed_buffer = self._collect_perturbed_rollout(traj_seed, self._u[i], self._q_u[i])
-            if self.mode == "trajectory":
-                terms = self._extract_terms(perturbed_buffer, 0, self._q_u[i])
-            else:
-                terms = self._extract_diagonal_terms(perturbed_buffer, self._q_u[i])
-            self._g_terms.append(terms)
+        if self.mode == "trajectory":
+            self._collect_perturbed_rollouts_batch(self._u, self._q_u)
+        else:
+            self._collect_perturbed_rollouts_batch_step(self._u, self._q_u)
 
         return True
 
-    def _extract_terms(
-        self, buffer: TrajectoryBuffer, env_idx: int, q_u_i: th.Tensor
-    ) -> Optional[tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]]:
+    def _extract_batched_terms(
+        self, buffer: TrajectoryBuffer, q_u: th.Tensor, valid_idx: np.ndarray
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, int]:
         """
-        Pull one full trajectory (all t = 0, ..., L-1) out of `buffer` at `env_idx`, paired
-        with the perturbation weights q(u_t) at those same timesteps. Used for the b-side
-        (reference trajectory) and for the g-side in "trajectory" mode (single perturbed
-        trajectory). Returns (states, returns_to_go, q_u, gamma_pow), or None if the
-        trajectory is empty. Values are materialized (copied) so they stay valid even after
-        `buffer` is reset/reused by a later call.
-        """
-        length = int(buffer._traj_lengths[env_idx])
-        if length == 0:
-            return None
+        b-side (both modes) and g-side ("trajectory" mode) extraction: pulls EVERY
+        trajectory named by `valid_idx` out of `buffer` at once (all t = 0, ..., L-1 of
+        each), concatenated into flat (total_steps, ...) tensors, plus `traj_idx` mapping
+        each row back to its trajectory's position within `valid_idx` (0, ..., len(valid_idx)
+        - 1). This lets the caller run ONE batched policy forward pass and ONE
+        `scatter_add_` over all trajectories, instead of looping over them one at a time
+        (each with its own forward pass).
 
-        states = buffer.to_torch(np.array(buffer._obs[env_idx]))
-        returns = buffer.to_torch(buffer._returns[env_idx].astype(np.float32, copy=False))
-        t_idx = th.arange(length, dtype=th.long, device=self.device)
-        return states, returns, q_u_i[t_idx], self.gamma ** t_idx.to(th.float32)
-
-    def _extract_diagonal_terms(
-        self, buffer: TrajectoryBuffer, q_u_i: th.Tensor
-    ) -> Optional[tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]]:
+        :param buffer: rollout_buffer (b-side, both modes) or self._perturbed_buffer
+            (g-side, "trajectory" mode only -- "step" mode's g-side uses
+            `_extract_diagonal_terms_batched` instead, since it needs one state per
+            candidate timestep rather than the whole sub-trajectory).
+        :param q_u: (batch_size, horizon, action_dim) perturbation weights for the whole batch.
+        :param valid_idx: env indices to include, e.g. trajectories that are non-empty in
+            BOTH the reference and perturbed buffers (a trajectory that's empty in either one
+            has no (g, b) pair to contribute and must be excluded from both sides identically).
+        :return: (states, returns_to_go, q_u, gamma_pow, traj_idx, n_valid).
         """
-        "step" mode g-side: `buffer` holds one sub-trajectory per candidate perturbation
-        timestep t (sub-env t == candidate t). For each t, pull sub-env t's OWN state and
-        return-to-go at ITS local index t (the diagonal) -- i.e. tilde_s_t^t and
-        R(tilde_tau^t_{t:}) from the PDF. Candidate t's whose episode ended before ever
-        reaching local step t (buffer._traj_lengths[t] <= t) are dropped: the perturbation
-        was never actually applied for them. Returns None if no candidate survived.
-        """
-        lengths = buffer._traj_lengths
-        valid_t = [t for t in range(buffer.n_envs) if lengths[t] > t]
-        if not valid_t:
-            return None
+        lengths_np = buffer._traj_lengths[valid_idx]
+        states = buffer.to_torch(np.concatenate([np.array(buffer._obs[i]) for i in valid_idx], axis=0))
+        returns = buffer.to_torch(
+            np.concatenate([buffer._returns[i] for i in valid_idx], axis=0).astype(np.float32, copy=False)
+        )
+        qu = th.cat([q_u[i, :length, :] for i, length in zip(valid_idx, lengths_np)], dim=0)
 
-        states = buffer.to_torch(np.stack([buffer._obs[t][t] for t in valid_t]))
-        returns = buffer.to_torch(np.array([buffer._returns[t][t] for t in valid_t], dtype=np.float32))
-        t_idx = th.tensor(valid_t, dtype=th.long, device=self.device)
-        return states, returns, q_u_i[t_idx], self.gamma ** t_idx.to(th.float32)
+        n_valid = len(valid_idx)
+        lengths = th.as_tensor(lengths_np, dtype=th.long, device=self.device)
+        traj_idx = th.repeat_interleave(th.arange(n_valid, device=self.device), lengths)
+        starts = th.cat([th.zeros(1, dtype=th.long, device=self.device), lengths.cumsum(0)[:-1]])
+        local_t = th.arange(states.shape[0], device=self.device) - starts[traj_idx]
+        gamma_pow = self.gamma ** local_t.to(th.float32)
+
+        return states, returns, qu, gamma_pow, traj_idx, n_valid
+
+    def _extract_diagonal_terms_batched(
+        self, buffer: TrajectoryBuffer, q_u: th.Tensor, valid_idx: np.ndarray
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, int]:
+        """
+        "step" mode g-side: `buffer` holds one sub-trajectory per (reference trajectory,
+        candidate perturbation timestep) pair -- sub-env `i * n_steps + t` is trajectory
+        i's candidate t. For each i in `valid_idx` and each of its candidates t, pulls
+        sub-env `i * n_steps + t`'s OWN state and return-to-go at ITS local index t (the
+        diagonal) -- i.e. tilde_s_t^t and R(tilde_tau^t_{t:}). Candidates whose episode
+        ended before ever reaching local step t are dropped: the perturbation was never
+        actually applied for them. Concatenates every valid (i, t) pair across the whole
+        batch into flat tensors, plus `traj_idx` mapping each row back to i's position
+        within `valid_idx` -- so multiple candidate t's for the same i scatter-add into
+        that single trajectory's g-term, exactly like `_extract_batched_terms` does for
+        the b-side and for "trajectory" mode's g-side.
+
+        :param buffer: self._perturbed_buffer, width == batch_size * n_steps.
+        :param q_u: (batch_size, n_steps, action_dim) perturbation weights for the whole batch.
+        :param valid_idx: reference-trajectory indices i to include -- each must have at
+            least one valid candidate (the caller is responsible for checking this).
+        :return: (states, returns_to_go, q_u, gamma_pow, traj_idx, n_valid).
+        """
+        lengths = buffer._traj_lengths.reshape(self.batch_size, self.n_steps)
+        t_range = np.arange(self.n_steps)
+
+        all_states, all_returns, all_qu, all_gamma_pow, all_traj_idx = [], [], [], [], []
+        for pos, i in enumerate(valid_idx):
+            valid_t = t_range[lengths[i] > t_range]
+            sub_env_idx = i * self.n_steps + valid_t
+            all_states.append(np.stack([buffer._obs[e][t] for e, t in zip(sub_env_idx, valid_t)]))
+            all_returns.append(np.array([buffer._returns[e][t] for e, t in zip(sub_env_idx, valid_t)], dtype=np.float32))
+            all_qu.append(q_u[i, valid_t, :])
+            all_gamma_pow.append(self.gamma ** valid_t.astype(np.float32))
+            all_traj_idx.append(np.full(len(valid_t), pos, dtype=np.int64))
+
+        states = buffer.to_torch(np.concatenate(all_states, axis=0))
+        returns = buffer.to_torch(np.concatenate(all_returns, axis=0))
+        qu = th.cat(all_qu, dim=0)
+        gamma_pow = buffer.to_torch(np.concatenate(all_gamma_pow, axis=0))
+        traj_idx = th.as_tensor(np.concatenate(all_traj_idx, axis=0), dtype=th.long, device=self.device)
+
+        return states, returns, qu, gamma_pow, traj_idx, len(valid_idx)
+
+    def _objective_from_terms(
+        self,
+        b_terms: tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, int],
+        g_terms: tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, int],
+    ) -> tuple[int, th.Tensor, np.ndarray, np.ndarray]:
+        """
+        Shared by both modes: given each side's already-flattened (states, returns_to_go,
+        q_u, gamma_pow, traj_idx, n_valid), runs exactly ONE forward pass per side and ONE
+        `scatter_add_` per side to reduce to per-trajectory sums, then pairs them into the
+        (g - b) objective. Mathematically identical to running the g/b computation
+        trajectory-by-trajectory and stacking the results -- just without the Python loop
+        around the (expensive) policy forward passes.
+        """
+        n_valid = b_terms[-1]
+        b_states, b_returns, b_qu, b_gamma_pow, b_traj_idx, _ = b_terms
+        g_states, g_returns, g_qu, g_gamma_pow, g_traj_idx, _ = g_terms
+
+        # mu_theta(s) computed WITH grad -- deterministic=True selects the mean action
+        # (no sampling noise), but the graph back to theta stays intact.
+        mu_b, _ = self.policy(b_states, deterministic=True)
+        mu_g, _ = self.policy(g_states, deterministic=True)
+
+        # sum_t gamma^t R(.) * <mu_theta(s_t), q(u_t)> per trajectory, via scatter_add_
+        # instead of a Python-level per-trajectory .sum().
+        weighted_b = b_gamma_pow * b_returns * (mu_b * b_qu).sum(-1)
+        weighted_g = g_gamma_pow * g_returns * (mu_g * g_qu).sum(-1)
+        obj_b = th.zeros(n_valid, device=self.device).scatter_add_(0, b_traj_idx, weighted_b)
+        obj_g = th.zeros(n_valid, device=self.device).scatter_add_(0, g_traj_idx, weighted_g)
+
+        objective_terms = obj_g - obj_b
+        return n_valid, objective_terms, obj_g.detach().cpu().numpy(), obj_b.detach().cpu().numpy()
+
+    def _train_objective_batched(self) -> tuple[int, th.Tensor, np.ndarray, np.ndarray]:
+        """
+        "trajectory" mode: b-side and g-side are both whole sub-trajectories, so both are
+        extracted with `_extract_batched_terms`.
+        """
+        b_lengths = self.rollout_buffer._traj_lengths
+        g_lengths = self._perturbed_buffer._traj_lengths
+        # A trajectory contributes only if BOTH its reference and perturbed rollout are
+        # non-empty -- the (g_i, b_i) pair has to come from the same i on both sides.
+        valid_idx = np.where((b_lengths > 0) & (g_lengths > 0))[0]
+        if len(valid_idx) == 0:
+            return 0, th.empty(0, device=self.device), np.empty(0), np.empty(0)
+
+        b_terms = self._extract_batched_terms(self.rollout_buffer, self._q_u, valid_idx)
+        g_terms = self._extract_batched_terms(self._perturbed_buffer, self._q_u, valid_idx)
+        return self._objective_from_terms(b_terms, g_terms)
+
+    def _train_objective_batched_step(self) -> tuple[int, th.Tensor, np.ndarray, np.ndarray]:
+        """
+        "step" mode: b-side is still a whole sub-trajectory (`_extract_batched_terms`), but
+        the g-side only needs each candidate timestep's diagonal entry
+        (`_extract_diagonal_terms_batched`) out of the width-(batch_size * n_steps)
+        perturbed buffer.
+        """
+        b_lengths = self.rollout_buffer._traj_lengths
+        g_lengths = self._perturbed_buffer._traj_lengths.reshape(self.batch_size, self.n_steps)
+        # A trajectory contributes only if its reference rollout is non-empty AND at least
+        # one of its candidate timesteps actually got perturbed before the episode ended.
+        has_valid_candidate = (g_lengths > np.arange(self.n_steps)[None, :]).any(axis=1)
+        valid_idx = np.where((b_lengths > 0) & has_valid_candidate)[0]
+        if len(valid_idx) == 0:
+            return 0, th.empty(0, device=self.device), np.empty(0), np.empty(0)
+
+        b_terms = self._extract_batched_terms(self.rollout_buffer, self._q_u, valid_idx)
+        g_terms = self._extract_diagonal_terms_batched(self._perturbed_buffer, self._q_u, valid_idx)
+        return self._objective_from_terms(b_terms, g_terms)
 
     def train(self) -> None:
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
 
-        objective_terms = []
-        g_values, b_values = [], []
-
-        for i in range(self.batch_size):
-            b_terms = self._extract_terms(self.rollout_buffer, i, self._q_u[i])
-            g_terms = self._g_terms[i]
-            if b_terms is None or g_terms is None:
-                continue
-
-            b_states, b_returns, b_qu, b_gamma_pow = b_terms
-            g_states, g_returns, g_qu, g_gamma_pow = g_terms
-
-            # mu_theta(s) computed WITH grad -- deterministic=True selects the mean action
-            # (no sampling noise), but the graph back to theta stays intact.
-            mu_b, _ = self.policy(b_states, deterministic=True)
-            mu_g, _ = self.policy(g_states, deterministic=True)
-
-            # sum_t gamma^t R(.) * <mu_theta(s_t), q(u_t)> -- a scalar whose gradient w.r.t.
-            # theta is exactly sum_t gamma^t R(.) * grad_theta mu_theta(s_t)^T q(u_t), i.e.
-            # sigma * b (resp. sigma * g) via a single vector-Jacobian product per side.
-            obj_b = (b_gamma_pow * b_returns * (mu_b * b_qu).sum(-1)).sum()
-            obj_g = (g_gamma_pow * g_returns * (mu_g * g_qu).sum(-1)).sum()
-
-            objective_terms.append(obj_g - obj_b)
-            g_values.append(obj_g.item())
-            b_values.append(obj_b.item())
+        if self.mode == "trajectory":
+            n_valid, objective_terms, g_values, b_values = self._train_objective_batched()
+        else:
+            n_valid, objective_terms, g_values, b_values = self._train_objective_batched_step()
 
         err_msg = "[FDPG] no valid (reference, perturbed) trajectory pair to train on this iteration"
-        assert objective_terms, err_msg
+        assert n_valid > 0, err_msg
 
         # mean over the batch of reference trajectories, then the 1/sigma factor shared by g and b
-        objective = th.stack(objective_terms).mean() / self.sigma
+        objective = objective_terms.mean() / self.sigma
         loss = -objective
 
         self.policy.optimizer.zero_grad()
@@ -424,12 +575,15 @@ class FDPG(TrajectoryOnPolicyAlgorithm):
         ]
 
         self._n_updates += 1
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        # Not excluded from tensorboard (unlike most "info" fields): this needs to be a
+        # real synced metric so wandb can plot other train/* curves against it as a custom
+        # x-axis (parameter updates rather than env timesteps).
+        self.logger.record("train/n_updates", self._n_updates)
         self.logger.record("train/policy_loss", loss.item())
         self.logger.record("train/objective", objective.item())
         self.logger.record("train/mean_g", float(np.mean(g_values)))
         self.logger.record("train/mean_b", float(np.mean(b_values)))
-        self.logger.record("train/n_valid_trajectories", len(objective_terms))
+        self.logger.record("train/n_valid_trajectories", n_valid)
         self.logger.record("train/mean_return", float(np.mean(ref_returns)))
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())

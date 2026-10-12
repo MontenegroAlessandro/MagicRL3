@@ -7,17 +7,25 @@ from stable_baselines3.common.callbacks import EvalCallback, CallbackList
 import wandb
 from wandb.integration.sb3 import WandbCallback
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 import torch.nn as nn
+import torch as th
 
+import subprocess
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(_REPO_ROOT)
+# Re-exec'd job subprocesses (see main()) start fresh and need this on PYTHONPATH
+# too, since a runtime sys.path edit like the one above isn't inherited by children.
+os.environ["PYTHONPATH"] = _REPO_ROOT + os.pathsep + os.environ.get("PYTHONPATH", "")
 import envs  # triggers the registration of new envs
-from algorithms import PolicyGradient, FDPG
+from algorithms import PolicyGradient, FDPG, BastaniFD, ZDPG
 from callbacks.trajectory_eval_callback import TrajectoryEvalCallback
+from callbacks.accurate_progress_bar_callback import AccurateProgressBarCallback
 
-ALGOS = ("reinforce", "gpomdp", "fdpg")
+ALGOS = ("reinforce", "gpomdp", "fdpg", "bastani_fd", "zdpg")
 
 
 def build_run_name(exp) -> str:
@@ -25,14 +33,12 @@ def build_run_name(exp) -> str:
     if algo.name == "reinforce":
         return (
             f"REINFORCE Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} "
-            f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma}"
         )
     elif algo.name == "gpomdp":
         return (
             f"GPOMDP Ne={exp.n_envs} H={exp.n_steps} "
-            f"lr={exp.learning_rate} γ={exp.gamma} "
-            f"ent={algo.ent_coef} norm_G={algo.normalize_returns}"
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma}"
         )
     elif algo.name == "fdpg":
         return (
@@ -40,12 +46,24 @@ def build_run_name(exp) -> str:
             f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} "
             f"{algo.sampling_mode}/{algo.sampling_strategy}"
         )
+    elif algo.name == "bastani_fd":
+        return (
+            f"BastaniFD-{algo.sampling_mode} Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} crn={algo.use_crn}"
+        )
+    elif algo.name == "zdpg":
+        return (
+            f"{'ZDPG-S' if algo.mode == 'symmetric' else 'ZDPG'} Ne={exp.n_envs} H={exp.n_steps} "
+            f"lr={exp.learning_rate} γ={exp.gamma} σ={algo.sigma} "
+            f"{algo.sampling_mode}/{algo.horizon_mode}"
+        )
     else:
         raise ValueError(f"Unknown experiment.algo.name '{algo.name}'. Choose from: {ALGOS}")
 
 
-def build_model(exp, env, policy_kwargs, tensorboard_log):
+def build_model(exp, env, policy_kwargs, tensorboard_log, env_kwargs=None):
     algo = exp.algo
+    env_kwargs = dict(env_kwargs or {})
     if algo.name in ["reinforce", "gpomdp"]:
         return PolicyGradient(
             g_estimator=algo.name,
@@ -57,6 +75,55 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
             max_grad_norm=exp.max_grad_norm,
             ent_coef=algo.ent_coef,
             normalize_returns=algo.normalize_returns,
+            use_sde=exp.use_sde,
+            sde_sample_freq=exp.sde_sample_freq,
+            stats_window_size=exp.stats_window_size,
+            policy_kwargs=policy_kwargs,
+            verbose=exp.verbose,
+            tensorboard_log=tensorboard_log,
+            seed=exp.seed,
+            device=exp.device,
+        )
+    elif algo.name == "bastani_fd":
+        return BastaniFD(
+            policy=exp.policy_type,
+            env=env,
+            learning_rate=exp.learning_rate,
+            n_steps=exp.n_steps,
+            gamma=exp.gamma,
+            sigma=algo.sigma,
+            # One parameter-space direction per sub-env, like FDPG's batch_size.
+            batch_size=exp.n_envs,
+            sampling_mode=algo.sampling_mode,
+            use_crn=algo.use_crn,
+            max_grad_norm=exp.max_grad_norm,
+            use_sde=exp.use_sde,
+            sde_sample_freq=exp.sde_sample_freq,
+            stats_window_size=exp.stats_window_size,
+            policy_kwargs=policy_kwargs,
+            verbose=exp.verbose,
+            tensorboard_log=tensorboard_log,
+            seed=exp.seed,
+            device=exp.device,
+        )
+    elif algo.name == "zdpg":
+        return ZDPG(
+            policy=exp.policy_type,
+            env=env,
+            learning_rate=exp.learning_rate,
+            n_steps=exp.n_steps,
+            gamma=exp.gamma,
+            sigma=algo.sigma,
+            # One (branch time, perturbation) sample per sub-env, like FDPG's batch_size.
+            batch_size=exp.n_envs,
+            mode=algo.mode,
+            sampling_mode=algo.sampling_mode,
+            horizon_mode=algo.horizon_mode,
+            # ZDPG restarts the system at the sampled states to evaluate the Q-function,
+            # which needs its own pool of environments built from the same id and kwargs.
+            env_id=exp.env_name,
+            env_kwargs=env_kwargs,
+            max_grad_norm=exp.max_grad_norm,
             use_sde=exp.use_sde,
             sde_sample_freq=exp.sde_sample_freq,
             stats_window_size=exp.stats_window_size,
@@ -82,6 +149,7 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
             sampling_mode=algo.sampling_mode,
             sampling_strategy=algo.sampling_strategy,
             env_id=exp.env_name,
+            env_kwargs=env_kwargs,
             max_grad_norm=exp.max_grad_norm,
             use_sde=exp.use_sde,
             sde_sample_freq=exp.sde_sample_freq,
@@ -98,7 +166,37 @@ def build_model(exp, env, policy_kwargs, tensorboard_log):
 
 @hydra.main(version_base=None, config_path=".", config_name="conf")
 def main(cfg: DictConfig):
+
     exp = cfg.experiment
+
+    if exp.algo.name == "fdpg" and exp.algo.mode == "trajectory" and exp.algo.sampling_strategy == "trajectory":
+        return
+
+    if os.environ.get("_RUN_PY_WORKER") != "1":
+        # Hydra's -m sweep runs every job sequentially inside ONE Python process (true
+        # even with a process-pool launcher plugin -- worker processes get reused
+        # across jobs, not spawned fresh per job). wandb's sync_tensorboard integration
+        # is not reliable across repeated wandb.init()/finish() cycles in one process:
+        # jobs after the first can silently lose ALL their logged metrics even though
+        # the run itself gets created. This isn't a monkeypatch-state bug we can fix
+        # from here -- wandb's own patch bookkeeping and wandb.run were both verified
+        # to reset correctly between jobs, yet the metrics still never arrived, so the
+        # fault is in wandb's shared backend service, not anything visible at the
+        # Python level. Re-executing this exact job as a fresh subprocess sidesteps the
+        # whole bug class by construction, while keeping -m's single-command sequential
+        # sweep and live terminal output (stdout/stderr are inherited directly here,
+        # unlike a launcher plugin that redirects each job's output to a log file).
+        overrides = list(HydraConfig.get().overrides.task)
+        worker_env = os.environ.copy()
+        worker_env["_RUN_PY_WORKER"] = "1"
+        result = subprocess.run(
+            [sys.executable, __file__] + overrides
+            + ["hydra.run.dir=.", "hydra.job.chdir=false", "hydra.output_subdir=null"],
+            env=worker_env,
+        )
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+        return
 
     base_name = build_run_name(exp)
 
@@ -113,31 +211,61 @@ def main(cfg: DictConfig):
         tags=cfg.wandb.tags,
     )
 
+    # sync_tensorboard bundles every scalar from one logger.dump() call into a single
+    # wandb.log(), so train/n_updates (resp. eval/n_updates) is always logged alongside
+    # the other train/* (resp. eval/*) metrics from that same call -- define it as their
+    # default x-axis so those charts plot against parameter updates out of the box,
+    # without needing to hand-edit each panel's x-axis in the wandb UI. The usual
+    # timesteps/global_step axis stays available too; this only changes the default.
+    wandb.define_metric("train/n_updates")
+    wandb.define_metric("train/*", step_metric="train/n_updates")
+    wandb.define_metric("eval/n_updates")
+    wandb.define_metric("eval/*", step_metric="eval/n_updates")
+
+    # Extra constructor arguments for the environment (dimensions, noise, time limit,
+    # ... for parametric envs such as LQR-v0). Every env of the run uses the same ones.
+    env_kwargs = OmegaConf.to_container(exp.env_kwargs, resolve=True) if exp.env_kwargs else {}
+
     # --- Training env ---
-    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed)
+    env = make_vec_env(exp.env_name, n_envs=exp.n_envs, seed=exp.seed, env_kwargs=env_kwargs)
 
     # --- Evaluation env ---
-    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_episodes, seed=exp.seed + 1000)
+    eval_env = make_vec_env(exp.env_name, n_envs=exp.n_eval_episodes, seed=exp.seed + 1000,
+                            env_kwargs=env_kwargs)
 
     # FDPG builds its own perturbed-env pool internally via raw gym.make() (see
     # FDPG._setup_model), bypassing VecNormalize. Wrapping the main env in VecNormalize
     # for FDPG would desync the reference rollout (normalized obs/reward) from the
     # perturbed one (raw obs/reward), corrupting the g-b estimator. So normalization
-    # is only applied for algos that don't have that side pool.
-    use_vecnormalize = exp.algo.name != "fdpg"
+    # is only applied for algos that don't have that side pool. The same holds for
+    # ZDPG, whose Q-sampling pool must reproduce the reference states exactly.
+    # BastaniFD also needs fixed observation/reward transforms across every +/-
+    # evaluation; online normalization would change the objective during finite
+    # differences.
+    use_vecnormalize = exp.algo.name not in ("fdpg", "bastani_fd", "zdpg") and (exp.normalize_obs or exp.normalize_reward)
     if use_vecnormalize:
         env = VecNormalize(env, norm_reward=exp.normalize_reward, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=True)
         # shares obs stats, never normalizes rewards
         eval_env = VecNormalize(eval_env, norm_reward=False, norm_obs=exp.normalize_obs, gamma=exp.gamma, training=False)
         eval_env.obs_rms = env.obs_rms
     elif exp.normalize_obs or exp.normalize_reward:
-        warnings.warn(
-            f"experiment.normalize_obs/normalize_reward are ignored for algo='{exp.algo.name}': "
+        reason = (
+            "observation/reward transforms must stay fixed across all +/- parameter rollouts."
+            if exp.algo.name == "bastani_fd" else
+            "its Q-sampling pool bypasses VecNormalize, so normalizing here would silently "
+            "desync the sampled states from the rollouts evaluated at them."
+            if exp.algo.name == "zdpg" else
             "its perturbed-env pool bypasses VecNormalize, so normalizing here would silently "
             "desync the reference and perturbed rollouts."
         )
+        warnings.warn(
+            f"experiment.normalize_obs/normalize_reward are ignored for algo='{exp.algo.name}': "
+            + reason
+        )
 
     # Parse policy kwargs (activation_fn must be converted from string to class)
+    if exp.algo.sigma is not None:
+        exp.policy_kwargs.log_std_init = float(th.log(th.tensor(exp.algo.sigma)))
     policy_kwargs = OmegaConf.to_container(exp.policy_kwargs, resolve=True) if exp.policy_kwargs is not None else None
     if policy_kwargs is not None and "activation_fn" in policy_kwargs:
         activation_map = {
@@ -153,18 +281,9 @@ def main(cfg: DictConfig):
             raise ValueError(f"Unknown activation_fn '{key}'. Choose from: {list(activation_map)}")
         policy_kwargs["activation_fn"] = activation_map[key]
 
-    model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}")
-
-    # eval_callback = EvalCallback(
-    #     eval_env,
-    #     best_model_save_path=f"{exp.dir_name}/models/{run.id}",
-    #     log_path=f"{exp.dir_name}/logs/{run.id}",
-    #     eval_freq=exp.eval_freq,
-    #     n_eval_episodes=exp.n_eval_episodes,
-    #     deterministic=True,
-    #     render=False,
-    #     verbose=0,
-    # )
+    model = build_model(exp, env, policy_kwargs, tensorboard_log=f"{exp.dir_name}/runs/{run.id}",
+                        env_kwargs=env_kwargs)
+    
     eval_callback = TrajectoryEvalCallback(
         eval_env,
         n_eval_episodes=exp.n_eval_episodes,
@@ -178,14 +297,23 @@ def main(cfg: DictConfig):
         verbose=2,
     )
 
+    # SB3's built-in progress_bar=True assumes one on_step() call == num_envs real
+    # timesteps, which FDPG breaks (perturbed-rollout steps bypass on_step()) --
+    # use our own bar that tracks num_timesteps directly instead.
+    progress_bar_callback = AccurateProgressBarCallback()
+
     if exp.eval_freq is not None:
-        callbacks = CallbackList([eval_callback, wandb_callback])
+        callbacks = CallbackList([eval_callback, wandb_callback, progress_bar_callback])
     else:
-        callbacks = CallbackList([wandb_callback])
+        callbacks = CallbackList([wandb_callback, progress_bar_callback])
+
+    if exp.algo.name == "zdpg":
+        # horizon_mode="auto" is resolved from gamma and the env's time limit.
+        wandb.config.update({"resolved_horizon_mode": model.resolved_horizon_mode})
 
     model.learn(
         total_timesteps=int(exp.total_timesteps),
-        progress_bar=True,
+        progress_bar=False,
         callback=callbacks,
     )
 
@@ -193,7 +321,7 @@ def main(cfg: DictConfig):
     model.save(f"{exp.dir_name}/{env_name}_{exp.algo.name.upper()}_{run.id}")
 
     if exp.render:
-        eval_env_render = gym.make(exp.env_name, render_mode="human")
+        eval_env_render = gym.make(exp.env_name, render_mode="human", **env_kwargs)
         obs, _ = eval_env_render.reset()
         for _ in range(1000):
             obs_input = env.normalize_obs(obs) if use_vecnormalize and exp.normalize_obs else obs

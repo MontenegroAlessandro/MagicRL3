@@ -1,0 +1,19 @@
+# Double integrator (a point mass driven by a force), discretised with dt = 0.1:
+# state = [position, velocity], action = acceleration,
+#   A = [[1, dt], [0, 1]],  B = [[dt^2 / 2], [dt]],  Q = I,  R = 1.
+# Under-actuated (1 input, 2 states) and marginally unstable open loop.
+#   optimal return: -11.8972 (H = 100, gamma = 1), -11.1148 (gamma = 0.99)
+#   optimal gain (gamma = 0.99): K* = [[-0.8427, -1.5463]]
+env_name: LQR-v0
+env_kwargs:
+  A: [[1.0, 0.1], [0.0, 1.0]]
+  B: [[0.005], [0.1]]
+  Q: [[1.0, 0.0], [0.0, 1.0]]
+  R: [[1.0]]
+  noise: 0.0
+  init_dist: uniform
+  init_bound: 1.0
+  max_episode_steps: 100
+n_steps: 100
+policy_kwargs:
+  net_arch: []

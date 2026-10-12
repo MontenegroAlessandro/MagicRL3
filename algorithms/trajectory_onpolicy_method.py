@@ -145,6 +145,15 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         Default: unchanged behavior."""
         return env.reset()
 
+    def _get_rollout_policy(self) -> ActorOnlyPolicy:
+        """Policy used for collection; callbacks still access the nominal self.policy."""
+        return self.policy
+
+    def _rollout_step_caps(self) -> Optional[np.ndarray]:
+        """Hook: optional per-env cap on the trajectory length (env i stops collecting
+        after caps[i] steps). Default: no per-env cap, only n_rollout_steps."""
+        return None
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -168,7 +177,8 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         :param n_rollout_steps: Maximum horizon (safety cap per trajectory)
         :return: False if the callback requested early termination, True otherwise
         """
-        self.policy.set_training_mode(False)
+        policy = self._get_rollout_policy()
+        policy.set_training_mode(False)
         rollout_buffer.reset()
 
         # Fresh reset: we always want complete trajectories, never mid-episode starts
@@ -177,27 +187,30 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
         self._last_episode_starts = np.ones(env.num_envs, dtype=bool)
 
         if self.use_sde:
-            self.policy.reset_noise(env.num_envs)
+            policy.reset_noise(env.num_envs)
 
         callback.on_rollout_start()
 
         # active[i] = True while env i is still collecting its trajectory
         active = np.ones(env.num_envs, dtype=bool)
+        step_caps = self._rollout_step_caps()
+        if step_caps is not None:
+            active &= step_caps > 0
         n_steps = 0
 
         while active.any() and n_steps < n_rollout_steps:
             if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
-                self.policy.reset_noise(env.num_envs)
+                policy.reset_noise(env.num_envs)
 
             with th.no_grad():
                 obs_tensor = obs_as_tensor(self._last_obs, self.device)  # type: ignore[arg-type]
-                actions, _ = self.policy(obs_tensor, deterministic=self.collect_deterministic_rollouts)
+                actions, _ = policy(obs_tensor, deterministic=self.collect_deterministic_rollouts)
             actions = actions.cpu().numpy()
 
             clipped_actions = actions
             if isinstance(self.action_space, spaces.Box):
-                if self.policy.squash_output:
-                    clipped_actions = self.policy.unscale_action(clipped_actions)
+                if policy.squash_output:
+                    clipped_actions = policy.unscale_action(clipped_actions)
                 else:
                     clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
 
@@ -230,6 +243,8 @@ class TrajectoryOnPolicyAlgorithm(BaseAlgorithm):
 
             # Deactivate envs whose trajectory just ended
             active &= ~dones
+            if step_caps is not None:
+                active &= n_steps < step_caps
 
             self._last_obs = new_obs  # type: ignore[assignment]
             self._last_episode_starts = dones

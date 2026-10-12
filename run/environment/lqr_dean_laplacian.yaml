@@ -1,0 +1,20 @@
+# Graph-Laplacian system of Dean, Mania, Matni, Recht & Tu, "On the Sample
+# Complexity of the Linear Quadratic Regulator" (2017), also used in Recht's
+# "A Tour of Reinforcement Learning" (2018): three weakly coupled, slightly
+# unstable nodes (spectral radius ~1.024) with cheap state cost, Q = 1e-3 I, R = I,
+# B = I, driven by Gaussian process noise.
+#   optimal return: -10.4363 (H = 100, gamma = 1), -11.9389 (gamma = 0.99)
+env_name: LQR-v0
+env_kwargs:
+  A: [[1.01, 0.01, 0.0], [0.01, 1.01, 0.01], [0.0, 0.01, 1.01]]
+  B: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+  Q: [[0.001, 0.0, 0.0], [0.0, 0.001, 0.0], [0.0, 0.0, 0.001]]
+  R: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+  noise: 1.0
+  init_dist: gaussian
+  init_mean: 0.0
+  init_std: 1.0
+  max_episode_steps: 100
+n_steps: 100
+policy_kwargs:
+  net_arch: []
